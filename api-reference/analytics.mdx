@@ -1,5 +1,5 @@
 ---
-title: "GET /api/analytics/summary — SIEM event analytics"
+title: "GET /api/analytics/summary — SIEM event analytics API"
 sidebarTitle: "GET /analytics/summary"
 description: "GET /api/analytics/summary — returns attack type counts, 6-hour event timeline, and MITRE tactic distribution over the last 1,000 classified events."
 ---
@@ -49,7 +49,7 @@ Returns an `AnalyticsSummary` object.
 </ResponseField>
 
 <ResponseField name="mitre_tactics" type="object">
-  Map of MITRE ATT&CK tactic name → event count. Benign events are included under their tactic value (typically `"N/A"`).
+  Map of MITRE ATT&CK tactic name → event count. Events with a tactic value of `"N/A"` or an empty string are excluded from this map. Only events with a named MITRE tactic (e.g. `"Credential Access"`, `"Discovery"`) are counted.
 </ResponseField>
 
 ## Example
@@ -92,8 +92,7 @@ curl http://localhost:8080/api/analytics/summary
   "mitre_tactics": {
     "Credential Access": 87,
     "Discovery": 31,
-    "Initial Access": 14,
-    "N/A": 10
+    "Initial Access": 14
   }
 }
 ```

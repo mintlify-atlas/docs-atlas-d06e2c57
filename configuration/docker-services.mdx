@@ -1,7 +1,7 @@
 ---
-title: "Start Qdrant, PostgreSQL, and Ollama with Docker"
+title: "Run Go SIEM Agent backing services with Docker Compose"
 sidebarTitle: "Docker Services"
-description: "Run the required Go SIEM Agent backing services — Qdrant vector DB, PostgreSQL, and Ollama embeddings — using the included Docker Compose configuration."
+description: "Start Qdrant, PostgreSQL, and Ollama for Go SIEM Agent using the bundled Docker Compose file and Makefile commands for one-command setup."
 ---
 
 Go SIEM Agent relies on three backing services for full functionality: **Qdrant** for vector embedding storage and semantic search, **PostgreSQL** for persisting classified events, and **Ollama** for generating `nomic-embed-text` embeddings locally. All three are bundled in the project's `docker-compose.yml` and can be started with a single `make` command.

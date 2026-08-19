@@ -1,7 +1,7 @@
 ---
-title: "Go SIEM Agent: AI-powered security log classifier"
+title: "Go SIEM Agent: AI-Powered Security Log Classification"
 sidebarTitle: "Introduction"
-description: "Go SIEM Agent classifies security events with LLM AI, maps them to MITRE ATT&CK, enriches IOCs, and streams live incidents over WebSocket. Built in Go."
+description: "Go SIEM Agent classifies security events with LLM AI, maps to MITRE ATT&CK, enriches IOCs, and streams live incidents over WebSocket in Go."
 ---
 
 Go SIEM Agent is a production-ready Security Information and Event Management system written in Go that transforms raw log lines into structured threat intelligence in real time. Security teams deal with an enormous volume of heterogeneous logs every day — syslog, nginx access logs, Windows Events, auth.log — and manually triaging each one is slow, error-prone, and doesn't scale. Go SIEM Agent solves this by feeding every log line through an LLM classifier that determines attack type, severity, and MITRE ATT&CK mapping instantly, then stores a vector embedding so you can recall similar historical events with a semantic search query, and finally streams live incident investigations directly to your React dashboard over WebSocket.
@@ -85,7 +85,7 @@ Go SIEM Agent processes every log event through three sequential phases:
 
 Here is the end-to-end journey of a single log line through Go SIEM Agent:
 
-1. **Ingest** — A log line arrives via `POST /api/classify`, `POST /api/classify/stream`, `POST /api/ingest` (batch up to 500 lines), file upload through the dashboard UI, or the CLI (`./bin/siemagent sample.log`).
+1. **Ingest** — A log line arrives via `POST /api/classify`, `POST /api/classify/stream`, `POST /api/ingest` (batch up to 500 lines), file upload through the dashboard UI, or the CLI (`./bin/siemagent test-logs.txt`).
 
 2. **Parse** — The parser (`internal/parser`) auto-detects the format. RFC 5424 and RFC 3164 syslog lines are fully parsed into hostname, app name, process ID, timestamp, and message. JSON logs are unmarshalled. Plain strings fall back to raw mode. The result is a `LogEvent` struct.
 

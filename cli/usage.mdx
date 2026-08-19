@@ -1,5 +1,5 @@
 ---
-title: "Classify log files from the command line"
+title: "siemagent CLI: classify log files and HTTP server mode"
 sidebarTitle: "CLI Usage"
 description: "Use the siemagent CLI to classify .log files offline, output JSON results, or start the HTTP server — all from the terminal without a browser."
 ---
@@ -95,8 +95,8 @@ make serve
 The server prints a startup log line and blocks until it receives `SIGINT` or `SIGTERM`, at which point it performs a 15-second graceful shutdown:
 
 ```
-INFO  SIEMAgent HTTP server starting  addr=:8080
-INFO  Qdrant connected, semantic search enabled
+INFO  SIEMAgent HTTP server starting  component=api  addr=:8080
+INFO  Qdrant connected, semantic search enabled  component=main
 ```
 
 ---

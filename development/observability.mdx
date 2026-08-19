@@ -153,12 +153,11 @@ The server uses Go's standard `log/slog` package throughout. Every log line is e
 ### Example log output
 
 ```
-INFO  SIEMAgent HTTP server starting  addr=:8080
+INFO  SIEMAgent HTTP server starting  component=api  addr=:8080
 INFO  Qdrant connected, semantic search enabled  component=main
 INFO  agent tool registry ready  component=main  tools=3
 INFO  request  component=api  method=POST  path=/api/classify  status=200  latency_ms=1234  request_id=abc123
 INFO  request  component=api  method=GET   path=/api/search    status=200  latency_ms=45    request_id=def456
-INFO  agent tool result  tool=lookup_abuseipdb  output_bytes=512
 WARN  Qdrant unavailable, semantic search disabled  component=main  error=dial tcp: connection refused
 ERROR classification failed  component=api  error=context deadline exceeded
 ```

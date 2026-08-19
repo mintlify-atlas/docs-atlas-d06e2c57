@@ -1,5 +1,5 @@
 ---
-title: "Classify logs from the dashboard or API"
+title: "Submit and classify logs via dashboard or REST API"
 sidebarTitle: "Log Ingestion"
 description: "Submit individual log lines or upload batch .log files to Go SIEM Agent for LLM classification via the dashboard UI or the REST ingest endpoint."
 ---
@@ -45,7 +45,13 @@ The **Upload** button (DropZone) to the left of the input bar accepts `.log` and
 </Steps>
 
 <Note>
-  The DropZone classifies all non-blank lines in your file — the back-end `POST /api/ingest` endpoint enforces a hard limit of **500 log lines per batch request**. Files with more than 500 lines will have lines beyond that limit silently dropped. Split large files into chunks of ≤ 500 lines before uploading.
+  The back-end `POST /api/ingest` endpoint enforces a hard limit of **500 log lines per batch request**. Requests with more than 500 lines are rejected with an HTTP 400 error:
+
+  ```json
+  { "error": "maximum 500 log lines per request" }
+  ```
+
+  Split large files into chunks of ≤ 500 lines before uploading.
 </Note>
 
 A ready-made test file with 30 mixed-severity events ships with the repository:
@@ -81,7 +87,7 @@ curl -X POST http://localhost:8080/api/ingest \
 
 The endpoint classifies all lines using the concurrent worker pool, stores each result in Qdrant (vector embedding) and PostgreSQL, and returns a chunked streaming progress response so you can track completion without polling.
 
-Available `format` values: `"auto"` (default), `"syslog"`, `"json"`, `"raw"`.
+Available `format` values: `"auto"` (default), `"syslog"`, `"json"`.
 
 <Tip>
   Use `make seed` to quickly populate the dashboard with 10 sample syslog events without typing or uploading anything:

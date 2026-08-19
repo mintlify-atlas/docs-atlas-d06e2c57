@@ -1,7 +1,7 @@
 ---
-title: "Navigate the Go SIEM Agent dashboard"
+title: "Go SIEM Agent dashboard: layout, panels, and features"
 sidebarTitle: "Dashboard Overview"
-description: "Tour the Go SIEM Agent React dashboard — event feed, severity filters, event detail panel, semantic search, analytics, and live incident overlay."
+description: "Tour the Go SIEM Agent React 19 dashboard — event feed, severity filters, event detail panel, semantic search, analytics, and live incident overlay."
 ---
 
 The Go SIEM Agent dashboard is a React 19 + Vite application that connects to the Go backend running on port `8080`. It gives you a live window into every classified security event — from the moment a log line is submitted, through LLM classification, MITRE ATT&CK mapping, and autonomous agent investigation. Open your browser to `http://localhost:5173` after starting both the backend and the Vite dev server to get started.
@@ -69,11 +69,11 @@ Clicking an event card opens the **detail panel** on the right (desktop) or as a
 
 ### Alert ticker
 
-When the agent investigates a P1 or P2 event it streams live progress to all connected clients. The `AlertTicker` component renders a fixed banner at the top of the viewport for each active or recently-completed incident. Each entry shows an `INCIDENT` badge with a pulsing animation, the incident ID, and a status indicator:
+When the agent investigates a P1 or P2 event it streams live progress to all connected clients. The `AlertTicker` component renders a fixed banner at the top of the viewport for each active or recently-completed incident. Each entry shows an `INCIDENT` badge with a pulsing animation, the incident ID in monospace, and a status indicator:
 
-- 🔄 Spinning orange loader — still investigating
-- ✅ Green check — playbook ready
-- ⚠️ Red triangle — investigation failed
+- 🔄 Spinning orange loader — **Investigating…**
+- ✅ Green check — **Playbook ready**
+- ⚠️ Red triangle — **Investigation failed**
 
 Click any ticker entry to open the **incident overlay** showing full tool call details and the final playbook.
 

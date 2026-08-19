@@ -1,5 +1,5 @@
 ---
-title: "Go SIEM Agent REST API reference overview"
+title: "SIEM Agent LLM Classifier Complete REST API Reference"
 sidebarTitle: "Overview"
 description: "Overview of Go SIEM Agent's HTTP API — base URL, authentication, rate limiting, content type, error format, and links to all endpoint documentation."
 ---
@@ -91,6 +91,7 @@ Every response from the server includes the following security headers regardles
 | `GET` | `/health/ready` | Readiness probe |
 | `GET` | `/metrics` | Prometheus metrics |
 | `GET` | `/docs` | Swagger UI |
+| `GET` | `/docs/openapi.yaml` | Raw OpenAPI 3.0 spec |
 
 <Note>
 The legacy top-level routes `POST /classify` and `POST /classify/stream` are kept as aliases for backward compatibility with clients that predate the `/api/` prefix. They behave identically to their `/api/` counterparts.

@@ -1,7 +1,7 @@
 ---
 title: "Semantic vector search over classified SIEM events"
 sidebarTitle: "Semantic Search"
-description: "How Go SIEM Agent indexes security events as 768-dim vector embeddings in Qdrant and enables natural language similarity search with Ollama nomic-embed-text."
+description: "How Go SIEM Agent indexes security events as 768-dim vectors in Qdrant and enables natural-language similarity search powered by Ollama nomic-embed-text."
 ---
 
 Semantic search lets you query your entire history of classified security events using natural language, rather than exact keyword matching. When you type "brute force SSH login attempts from Eastern Europe", Go SIEM Agent embeds that phrase as a vector and returns the most similar past events by cosine similarity — even if none of them contain that exact wording. This powers both the search page in the dashboard and the agent's similar-event recall during autonomous investigations.
@@ -14,7 +14,7 @@ The semantic search subsystem has three components:
 2. **Qdrant** — stores every classified event as a vector point in the `siem_events` collection, with a structured metadata payload alongside each vector.
 3. **Cosine similarity** — Qdrant's query engine finds the nearest neighbours to a query vector using cosine distance, returning ranked results with a `score` in `[0, 1]`.
 
-```
+```text
 Query text
     │
     ▼
@@ -121,7 +121,7 @@ After every successful classification, the event is indexed asynchronously in a 
 
 ### HTTP endpoint
 
-```
+```http
 GET /api/search?q=brute+force+SSH+login&limit=10
 GET /api/search?q=ransomware+encryption&limit=5&severity=P1
 ```

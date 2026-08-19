@@ -1,5 +1,5 @@
 ---
-title: "Monitor live security incidents in real time"
+title: "Stream live P1/P2 security incident investigations"
 sidebarTitle: "Live Incidents"
 description: "How Go SIEM Agent streams P1/P2 incident investigations over WebSocket to the alert ticker and incident overlay in the React dashboard."
 ---
@@ -13,20 +13,20 @@ The end-to-end flow from classification to the dashboard is:
 1. **Classification** — a log line is classified as P1 or P2 by the LLM classifier.
 2. **Agent launch** — the `maybeInvestigate` function checks severity and launches a goroutine running the agent loop.
 3. **Tool calls** — the agent iteratively calls tools: `lookup_mitre`, `check_abuseipdb`, `check_otx`, and `similar_events`. Each tool call and its result is emitted as an `AgentEvent` frame.
-4. **Sanitisation & broadcast** — each frame is sanitised (PII and sensitive fields are stripped) before being broadcast via the WebSocket Hub to all clients connected to `/ws/alerts`.
+4. **Sanitisation & broadcast** — each frame is sanitised before being broadcast via the WebSocket Hub to all clients connected to `/ws/alerts`.
 5. **React hook** — the `useAlertStream` hook receives frames, folds them into the incident map using a pure `apply` reducer, and updates React state.
 6. **UI update** — the alert ticker shows a new entry (or updates an existing one); clicking an entry opens the full incident overlay.
 
 ## WebSocket frame format
 
-Each frame broadcast on `/ws/alerts` is a JSON-encoded `AgentEvent`:
+Each frame broadcast on `/ws/alerts` is a JSON object assembled by the server's `maybeInvestigate` function. The frame carries the `incident_id` (a random 16-hex-character string), the `event_id` (the originating event's `processed_at` timestamp in RFC3339Nano format), the event `type`, and a `data` payload:
 
 ```json
 {
-  "incident_id": "a1b2c3d4",
-  "event_id": "2024-01-15T10:30:01.123Z",
+  "incident_id": "a1b2c3d4e5f60718",
+  "event_id": "2024-01-15T10:30:01.123456789Z",
   "type": "tool_call",
-  "data": "{\"name\":\"lookup_mitre\",\"input\":{\"technique_id\":\"T1110\"}}"
+  "data": "{\"name\":\"lookup_mitre\",\"input\":\"{\\\"technique_id\\\":\\\"T1110\\\"}\"}"
 }
 ```
 
@@ -34,11 +34,20 @@ Each frame broadcast on `/ws/alerts` is a JSON-encoded `AgentEvent`:
 
 | Type | Meaning |
 |---|---|
-| `tool_call` | Agent is about to call a tool — `data` contains `{"name": "...", "input": {...}}` |
+| `tool_call` | Agent is about to call a tool — `data` contains `{"name": "...", "input": "..."}` (JSON-encoded string) |
 | `tool_result` | Tool returned a result — `data` is the raw JSON result string |
 | `chunk` | A fragment of the synthesised playbook — `data` is a markdown string chunk |
-| `done` | Investigation complete — incident status transitions to `complete` |
-| `error` | Investigation failed — incident status transitions to `failed` |
+| `done` | Investigation complete — `data` is an empty string; incident status transitions to `complete` |
+| `error` | Investigation failed — `data` contains the error message; incident status transitions to `failed` |
+
+## Sanitisation
+
+Before each frame is broadcast, the server sanitises all log-derived string fields in the classified event. The `sanitizeEvent` function in `internal/api/sanitize.go`:
+
+- Strips ANSI/VT100 escape sequences (e.g. terminal colour codes that a crafted log line could inject)
+- Removes C0 control characters (bytes 0x00–0x1F and 0x7F), **except** tab (`\t`) and newline (`\n`)
+
+This defends against log-injection attacks where a malicious log line attempts to exploit a terminal or log viewer consuming the API output.
 
 ## The `useAlertStream` hook
 
@@ -65,13 +74,15 @@ Each `Incident` object maintained by the hook has this shape:
 
 ```typescript
 interface Incident {
-  id: string           // incident_id from frames
-  eventId: string      // the originating classified event ID
+  id: string             // incident_id from frames
+  eventId: string        // the originating classified event ID
   status: 'investigating' | 'complete' | 'failed'
   tools: ToolInvocation[]   // ordered list of tool calls + results
-  playbook: string     // accumulated playbook markdown chunks
+  playbook: string       // accumulated playbook markdown chunks
 }
 ```
+
+The hook also returns a `clearIncident(id)` callback that removes a specific incident from the map — used by the overlay's close button.
 
 ## Alert ticker
 
@@ -79,16 +90,16 @@ The `AlertTicker` component renders a fixed banner at the top of the viewport �
 
 - A red `INCIDENT` badge with pulse animation
 - The incident ID in monospace
-- A status indicator:
-  - 🔄 Spinning orange — `investigating`
-  - ✅ Green check — `complete`
-  - ⚠️ Red triangle — `failed`
+- A status indicator with descriptive text:
+  - 🔄 Spinning orange — **Investigating…**
+  - ✅ Green check — **Playbook ready**
+  - ⚠️ Red triangle — **Investigation failed**
 
 Clicking any banner entry opens the **incident overlay** for that investigation.
 
 ## Incident overlay
 
-The incident overlay (`Incident` page component) is a two-column panel:
+The incident overlay (`Incident` page component) is rendered as a modal over the dashboard. On desktop it is a two-column panel (left 40 % / right 60 %); on mobile the columns stack vertically.
 
 ### Left column — tool timeline & threat intel
 
@@ -119,5 +130,5 @@ The synthesised investigation playbook streams in as `chunk` frames arrive. The 
   websocat ws://localhost:8080/ws/alerts
   ```
 
-  Each line of output is one JSON-encoded `AgentEvent`. This is useful for debugging agent behaviour or verifying that a particular investigation is progressing.
+  Each line of output is one JSON-encoded frame. This is useful for debugging agent behaviour or verifying that a particular investigation is progressing.
 </Tip>

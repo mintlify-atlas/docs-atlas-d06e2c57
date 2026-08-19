@@ -1,5 +1,5 @@
 ---
-title: "Analyze security event trends with SIEM analytics"
+title: "Go SIEM Agent analytics: charts, heatmap, and trends"
 sidebarTitle: "Analytics"
 description: "Explore Go SIEM Agent's analytics dashboard — attack type bar chart, event rate timeline, MITRE tactic distribution, heatmap, and threat intel panel."
 ---
@@ -10,11 +10,18 @@ The analytics panel visualises the last 1,000 classified events held in the back
 
 ### Critical / High counters
 
-Two large numerical badges at the top of the panel show the total count of P1 Critical and P2 High events across all stored data. These are derived from the `attack_type_counts` field of the summary — they sum all entries whose `severity` is `"P1"` or `"P2"` respectively.
+Two large numerical badges at the top of the panel show the total count of P1 Critical and P2 High events across all stored data. The frontend computes these by iterating `attack_type_counts` from the summary response and summing event counts for entries whose `severity` equals `"P1"` or `"P2"` respectively:
+
+```typescript
+const criticalCount = Object.values(data.attack_type_counts)
+  .filter(v => v.severity === 'P1').reduce((a, v) => a + v.count, 0)
+const highCount = Object.values(data.attack_type_counts)
+  .filter(v => v.severity === 'P2').reduce((a, v) => a + v.count, 0)
+```
 
 ### Attack type bar chart
 
-A horizontal bar chart (rendered via [Recharts](https://recharts.org) `BarChart`) showing the top 10 attack types ordered by event count. Each bar is coloured using the highest severity seen for that attack type — so a "Brute Force" bucket that contains one P1 event renders in the P1 colour even if most of its events are P3.
+A vertical bar chart (rendered via [Recharts](https://recharts.org) `BarChart`) showing the top 10 attack types ordered by event count. Each bar is coloured using the highest severity seen for that attack type — so a "Brute Force" bucket that contains one P1 event renders in the P1 colour even if most of its events are P3. Attack type names longer than 16 characters are truncated with an ellipsis in the chart label.
 
 Data source: `attack_type_counts` from `GET /api/analytics/summary`.
 
@@ -31,7 +38,9 @@ A multi-line chart covering the last **6 hours** split into **36 × 10-minute bu
 
 - P1 — solid line, P1 severity colour
 - P2 — solid line, P2 severity colour
-- P3 — dashed line, P3 severity colour
+- P3 — dashed line (`4 2` stroke dash array), P3 severity colour
+
+Only P1, P2, and P3 events are counted in the timeline; P4 and P5 events are excluded.
 
 Data source: `timeline` array from the summary.
 
@@ -44,7 +53,7 @@ Data source: `timeline` array from the summary.
 
 ### MITRE tactic pie chart
 
-A donut chart showing the distribution of MITRE ATT&CK tactics across all stored events, limited to the top 6 tactics by count. Tactics labelled `"N/A"` are excluded. Eight sequential colours cycle through the segments for visual distinction.
+A donut chart showing the distribution of MITRE ATT&CK tactics across all stored events, limited to the top 6 tactics by count. Tactics labelled `""` or `"N/A"` are excluded. Eight sequential colours cycle through the segments for visual distinction.
 
 Data source: `mitre_tactics` from the summary.
 
@@ -107,10 +116,10 @@ Full response shape:
 
 | Field | Type | Description |
 |---|---|---|
-| `total_events` | `number` | Total events in the ring buffer |
+| `total_events` | `number` | Total events in the ring buffer (up to 1,000) |
 | `attack_type_counts` | `object` | Event count and highest severity per attack type |
-| `timeline` | `array` | 36 × 10-min buckets for the last 6 hours |
-| `mitre_tactics` | `object` | Event count per MITRE ATT&CK tactic |
+| `timeline` | `array` | 36 × 10-min buckets for the last 6 hours (P1/P2/P3 only) |
+| `mitre_tactics` | `object` | Event count per MITRE ATT&CK tactic (excludes blank and "N/A") |
 
 ## Data persistence
 

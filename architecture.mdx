@@ -1,7 +1,7 @@
 ---
-title: "Go SIEM Agent architecture and data flow"
+title: "Go SIEM Agent: Architecture, Routes, and Data Flow"
 sidebarTitle: "Architecture"
-description: "How Go SIEM Agent connects the Go HTTP server, LLM classifier, Qdrant vector DB, Ollama embeddings, and React dashboard into a real-time SIEM pipeline."
+description: "How Go SIEM Agent wires the Go HTTP server, LLM classifier, Qdrant vector DB, Ollama embeddings, and React dashboard into a real-time SIEM pipeline."
 ---
 
 Go SIEM Agent is composed of six distinct layers — a React frontend, a Chi-based Go HTTP server, an LLM classifier, a vector store, an embeddings service, and a relational database — wired together into a single cohesive pipeline that takes a raw log line as input and produces structured threat intelligence, persisted vector embeddings, and a live WebSocket incident stream as output. Each layer is independently replaceable: the LLM provider, vector database, and embeddings model are all abstracted behind interfaces, so tests can inject mocks and production deployments can swap providers without touching application logic.
@@ -204,8 +204,7 @@ go-siem-agent-llm-classifier/
 │   │   └── src/              # Components, hooks, pages, tests
 │   ├── docker-compose.yml    # Qdrant + PostgreSQL + Ollama services
 │   ├── Makefile              # All dev commands (see `make help`)
-│   ├── sample.log            # Sample log file for CLI mode
-│   └── test-logs.log         # 30-line mixed-severity test file
+│   └── test-logs.txt         # 30-line mixed-severity test file
 └── README.md
 ```
 
@@ -218,10 +217,14 @@ stop := make(chan os.Signal, 1)
 signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
 go func() {
+    slog.Info("shutting down", "component", "main")
     <-stop
     ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
     defer cancel()
-    srv.HTTPServer().Shutdown(ctx)
+    if err := srv.HTTPServer().Shutdown(ctx); err != nil {
+        slog.Error("shutdown error", "component", "main", "error", err)
+    }
+    slog.Info("shutdown complete", "component", "main")
 }()
 ```
 

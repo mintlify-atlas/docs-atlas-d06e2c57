@@ -134,7 +134,7 @@ func (r *Registry) Dispatch(ctx context.Context, name string, input json.RawMess
   <Card title="Similar Events" icon="magnifying-glass">
     **Tool name:** `search_similar_events`
 
-    Embeds a natural-language incident description with Ollama and runs a semantic nearest-neighbour search in Qdrant. Returns up to 20 past events ranked by cosine similarity, giving the agent historical precedent to reason over.
+    Embeds a natural-language incident description with Ollama and runs a semantic nearest-neighbour search in Qdrant. Returns up to 20 past events ranked by cosine similarity, giving the agent historical precedent to reason over. Registered only when Qdrant is reachable at startup.
   </Card>
 </CardGroup>
 

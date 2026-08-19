@@ -1,5 +1,5 @@
 ---
-title: "Severity levels P1–P5 in Go SIEM Agent"
+title: "Security event severity levels P1–P5 in Go SIEM Agent"
 sidebarTitle: "Severity Model"
 description: "How Go SIEM Agent's LLM assigns severity levels P1 through P5 to classified security events, with examples and dashboard visual indicators."
 ---
@@ -72,7 +72,7 @@ The LLM prompt reproduces the same definitions verbatim so the model never needs
 </Accordion>
 
 <Warning>
-  **P1 events trigger an immediate autonomous investigation with a 2-minute timeout.** If the LLM or external threat-intel APIs are slow or unavailable, the investigation times out gracefully and a partial playbook is broadcast. No P1 event is silently dropped — the investigation attempt is always made.
+  **P1 and P2 events both trigger an immediate autonomous investigation with a 2-minute timeout.** If the LLM or external threat-intel APIs are slow or unavailable, the investigation times out gracefully and a partial playbook is broadcast. No P1 or P2 event is silently dropped — the investigation attempt is always made.
 </Warning>
 
 ## Dashboard visual indicators

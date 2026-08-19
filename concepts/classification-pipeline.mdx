@@ -1,5 +1,5 @@
 ---
-title: "How Go SIEM Agent classifies security log events"
+title: "Go SIEM Agent log classification pipeline explained"
 sidebarTitle: "Classification Pipeline"
 description: "Step-by-step walkthrough of Go SIEM Agent's log classification pipeline: parsing, LLM inference, IOC extraction, vector indexing, and storage."
 ---
@@ -10,9 +10,10 @@ Every log line that enters Go SIEM Agent flows through a deterministic, multi-st
 
 <Steps>
   <Step title="Receive">
-    The pipeline begins when a client submits a log line to either of two HTTP endpoints:
+    The pipeline begins when a client submits a log line to one of three HTTP endpoints:
 
-    - **`POST /api/classify`** — classifies a single log line and returns the result synchronously.
+    - **`POST /api/classify`** — classifies a single log line and returns the `ClassifiedEvent` JSON synchronously.
+    - **`POST /api/classify/stream`** — same as above but streams the LLM response token by token as Server-Sent Events (`text/event-stream`), with a final `{"result": ..., "done": true}` frame.
     - **`POST /api/ingest`** — accepts a batch of up to 500 log lines, fans them out over a worker pool, and returns an `IngestResponse`.
 
     ```go

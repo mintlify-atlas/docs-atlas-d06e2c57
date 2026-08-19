@@ -1,7 +1,7 @@
 ---
-title: "POST /api/classify — classify a single log line"
+title: "POST /api/classify — Classify a Single Security Log"
 sidebarTitle: "POST /api/classify"
-description: "POST /api/classify — sends a raw log line to the LLM classifier and returns a ClassifiedEvent with attack type, severity, MITRE mapping, IOCs, and remediation."
+description: "POST /api/classify — send a raw log line to the LLM classifier and get a ClassifiedEvent with attack type, MITRE mapping, severity, IOCs, and remediation."
 ---
 
 This endpoint accepts a raw log line, parses it into structured fields (auto-detecting RFC 5424 syslog, RFC 3164 syslog, JSON, or treating the input as a raw string), and sends it to the LLM classifier. The resulting `ClassifiedEvent` is stored in the server's in-memory ring buffer and, for P1 and P2 severity events, automatically triggers an autonomous agent investigation whose progress is broadcast over the `/ws/alerts` WebSocket.

@@ -1,7 +1,7 @@
 ---
-title: "Connect Go SIEM Agent to any LLM provider"
+title: "Connect Go SIEM Agent to any OpenAI-compatible LLM"
 sidebarTitle: "LLM Providers"
-description: "Configure Go SIEM Agent to use Kimchi, OpenAI, Groq, Mistral, or any OpenAI-compatible LLM endpoint by setting KIMCHI_BASE_URL and SIEM_MODEL."
+description: "Configure Go SIEM Agent to use Kimchi, OpenAI, Groq, or any OpenAI-compatible endpoint by setting KIMCHI_BASE_URL and SIEM_MODEL in your .env file."
 ---
 
 The Go SIEM Agent classifier communicates with LLM providers through the standard OpenAI-compatible chat completions API. Because the integration relies only on `/chat/completions` with a `response_format` of `json_object`, any provider that exposes an OpenAI-compatible endpoint — hosted or local — can drive the classifier without any code changes.
@@ -48,11 +48,11 @@ The resulting `Config.BaseURL`, `Config.APIKey`, and `Config.ModelName` are pass
     ```bash
     # .env
     KIMCHI_API_KEY=your_kimchi_api_key_here
-    KIMCHI_BASE_URL=https://llm.kimchi.dev/openai/v1
-    SIEM_MODEL=minimax-m3
+    KIMCHI_BASE_URL=https://api.kimchi.ai/v1
+    SIEM_MODEL=kimi-k2-5
     ```
 
-    Get a free API key at [app.kimchi.dev](https://app.kimchi.dev). The `minimax-m3` model has strong instruction-following and reliable JSON output, making it well-suited for security classification tasks.
+    Get a free API key at [app.kimchi.dev](https://app.kimchi.dev). The `kimi-k2-5` model has strong instruction-following and reliable JSON output, making it well-suited for security classification tasks.
   </Tab>
   <Tab title="OpenAI">
     Use any OpenAI model by pointing `KIMCHI_BASE_URL` at the standard OpenAI API. Your existing `OPENAI_API_KEY` variable is automatically picked up as a fallback if `KIMCHI_API_KEY` is not set.

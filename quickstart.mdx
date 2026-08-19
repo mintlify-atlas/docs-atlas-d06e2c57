@@ -1,5 +1,5 @@
 ---
-title: "Get started with Go SIEM Agent"
+title: "Quickstart: Go SIEM Agent Setup and First Classification"
 sidebarTitle: "Quickstart"
 description: "Install Go SIEM Agent, start Docker services, configure your LLM API key, and classify your first security log line in under 10 minutes."
 ---
@@ -189,16 +189,16 @@ By the end of this guide you will have the full Go SIEM Agent stack running loca
 
   ```bash
   make build
-  ./bin/siemagent sample.log
+  ./bin/siemagent test-logs.txt
   ```
 
   To write results to a JSON file instead of stdout:
 
   ```bash
-  ./bin/siemagent --output results.json sample.log
+  ./bin/siemagent --output results.json test-logs.txt
   ```
 
-  A ready-made sample file is included at `siemagent/sample.log`, and a 30-line mixed-severity test file is at `siemagent/test-logs.log`.
+  A 30-line mixed-severity test file is included at `siemagent/test-logs.txt`.
 </Tip>
 
 ## Using another LLM provider
