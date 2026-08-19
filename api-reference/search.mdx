@@ -1,0 +1,128 @@
+---
+title: "GET /api/search — semantic vector search over events"
+sidebarTitle: "GET /api/search"
+description: "GET /api/search — embeds a natural language query with Ollama and performs nearest-neighbour search in Qdrant, returning ranked similar security events."
+---
+
+Semantic search converts the query text into a 768-dimensional vector embedding using Ollama's `nomic-embed-text` model, then queries Qdrant for the nearest neighbours by cosine similarity. Results are ranked by similarity score so the most relevant past events appear first. This lets analysts find related incidents using natural language rather than exact keyword matching — for example, "privilege escalation on Linux" will surface `sudo` abuse events even if those exact words don't appear in the log.
+
+## Request
+
+**Method:** `GET`  
+**Path:** `/api/search`
+
+### Query Parameters
+
+<ParamField query="q" type="string" required>
+  Natural language search query. Examples: `"brute force SSH login from China"`, `"privilege escalation via sudo"`, `"SQL injection in login form"`. Minimum length 1 character.
+</ParamField>
+
+<ParamField query="severity" type="string">
+  Filter results to a single severity level. Must be one of `P1`, `P2`, `P3`, `P4`, or `P5`. When omitted, results from all severity levels are returned.
+</ParamField>
+
+<ParamField query="limit" type="integer">
+  Maximum number of results to return. Must be between `1` and `100`. Defaults to `20`.
+</ParamField>
+
+## Response
+
+**Status:** `200 OK`  
+**Content-Type:** `application/json`
+
+Returns a JSON array of `SearchHit` objects ordered by descending similarity score.
+
+<ResponseField name="event_id" type="string">
+  Identifier for the matched event, derived from the event's message prefix as stored in Qdrant.
+</ResponseField>
+
+<ResponseField name="timestamp" type="string (datetime)">
+  ISO 8601 timestamp of when the original event was classified.
+</ResponseField>
+
+<ResponseField name="source" type="string">
+  Log format that produced this event. One of `syslog`, `json`, or `raw`.
+</ResponseField>
+
+<ResponseField name="attack_type" type="string">
+  Attack classification label assigned by the LLM, e.g. `"Brute Force"`, `"SQL Injection"`, `"Benign"`.
+</ResponseField>
+
+<ResponseField name="severity" type="string">
+  Severity level of the event: `P1`, `P2`, `P3`, `P4`, or `P5`.
+</ResponseField>
+
+<ResponseField name="summary" type="string">
+  Human-readable description of what the event represents.
+</ResponseField>
+
+<ResponseField name="mitre_tactic" type="string">
+  MITRE ATT&CK tactic name associated with the event, e.g. `"Credential Access"`.
+</ResponseField>
+
+<ResponseField name="score" type="float">
+  Cosine similarity score between the query vector and this event's stored vector. Range `0.0`–`1.0`. A score of `1.0` means perfect match; typical matches above `0.85` are considered highly relevant.
+</ResponseField>
+
+## Error Responses
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `400` | `{"error": "q parameter is required"}` | Missing `q` query parameter |
+| `500` | `{"error": "embedding failed"}` | Ollama embedding call failed |
+| `500` | `{"error": "search failed"}` | Qdrant nearest-neighbour search failed |
+| `503` | `{"error": "semantic search not configured (Qdrant/Ollama not available)"}` | Qdrant or Ollama not configured |
+
+## Examples
+
+### Basic Search
+
+```bash
+curl 'http://localhost:8080/api/search?q=brute+force+SSH&limit=5'
+```
+
+```json
+[
+  {
+    "event_id": "Failed password f",
+    "timestamp": "2024-01-15T10:30:01Z",
+    "source": "syslog",
+    "attack_type": "Brute Force",
+    "severity": "P2",
+    "summary": "Multiple failed SSH login attempts from 192.168.1.100.",
+    "mitre_tactic": "Credential Access",
+    "score": 0.97
+  },
+  {
+    "event_id": "Failed password f",
+    "timestamp": "2024-01-14T08:12:44Z",
+    "source": "syslog",
+    "attack_type": "Brute Force",
+    "severity": "P2",
+    "summary": "SSH brute force attempt targeting root account from 203.0.113.5.",
+    "mitre_tactic": "Credential Access",
+    "score": 0.91
+  }
+]
+```
+
+### Filter by Severity
+
+```bash
+# Return only P1 (Critical) privilege escalation events
+curl 'http://localhost:8080/api/search?q=privilege+escalation&severity=P1&limit=10'
+```
+
+### Natural Language Queries
+
+```bash
+# Find events matching lateral movement behaviour
+curl 'http://localhost:8080/api/search?q=lateral+movement+internal+network&limit=20'
+
+# Find web application attacks
+curl 'http://localhost:8080/api/search?q=SQL+injection+web+application+login&severity=P2'
+```
+
+<Note>
+This endpoint returns `503 Service Unavailable` when the `QDRANT_ADDR` environment variable is not configured or when Ollama is unreachable. Use `GET /health/ready` to verify that both dependencies are available before calling this endpoint.
+</Note>

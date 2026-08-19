@@ -1,0 +1,207 @@
+---
+title: "Semantic vector search over classified SIEM events"
+sidebarTitle: "Semantic Search"
+description: "How Go SIEM Agent indexes security events as 768-dim vector embeddings in Qdrant and enables natural language similarity search with Ollama nomic-embed-text."
+---
+
+Semantic search lets you query your entire history of classified security events using natural language, rather than exact keyword matching. When you type "brute force SSH login attempts from Eastern Europe", Go SIEM Agent embeds that phrase as a vector and returns the most similar past events by cosine similarity — even if none of them contain that exact wording. This powers both the search page in the dashboard and the agent's similar-event recall during autonomous investigations.
+
+## Architecture
+
+The semantic search subsystem has three components:
+
+1. **Ollama** — runs the `nomic-embed-text` model locally to generate 768-dimensional `float32` vectors from text.
+2. **Qdrant** — stores every classified event as a vector point in the `siem_events` collection, with a structured metadata payload alongside each vector.
+3. **Cosine similarity** — Qdrant's query engine finds the nearest neighbours to a query vector using cosine distance, returning ranked results with a `score` in `[0, 1]`.
+
+```
+Query text
+    │
+    ▼
+Ollama nomic-embed-text  →  768-dim float32 vector
+    │
+    ▼
+Qdrant "siem_events" collection  →  top-K nearest neighbours (cosine)
+    │
+    ▼
+SearchHit[]  →  HTTP response / agent context
+```
+
+## Ollama embedder
+
+The `ollama.Embedder` sends text to the local Ollama server (`POST /api/embeddings`) using the `nomic-embed-text` model:
+
+```go
+type Embedder struct {
+    baseURL string
+    client  *http.Client
+}
+
+func NewEmbedder(baseURL string) *Embedder {
+    if baseURL == "" {
+        baseURL = "http://localhost:11434"
+    }
+    return &Embedder{
+        baseURL: baseURL,
+        client:  &http.Client{Timeout: 30 * time.Second},
+    }
+}
+
+// Embed returns a vector embedding for the given text using nomic-embed-text.
+func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
+    body, _ := json.Marshal(embedRequest{Model: "nomic-embed-text", Prompt: text})
+    // POST http://localhost:11434/api/embeddings
+    // Returns []float32 of length 768
+}
+```
+
+For batch indexing, `EmbedBatch` runs up to 5 concurrent embedding requests to maximise throughput during large ingests without overwhelming the Ollama server.
+
+## Qdrant collection
+
+The Qdrant store creates the `siem_events` collection with a 768-dimension cosine-distance vector space at startup:
+
+```go
+// EnsureCollection creates the collection if it does not already exist.
+// dims must match the embedding model output (768 for nomic-embed-text).
+func (s *Store) EnsureCollection(ctx context.Context, dims uint64) error {
+    err := s.client.CreateCollection(ctx, &qd.CreateCollection{
+        CollectionName: s.collection,
+        VectorsConfig: qd.NewVectorsConfig(&qd.VectorParams{
+            Size:     dims,          // 768
+            Distance: qd.Distance_Cosine,
+        }),
+    })
+    // ...
+}
+```
+
+Keyword indexes are created on `severity` and `attack_type` payload fields at collection creation time, enabling hybrid vector + keyword queries.
+
+## Indexing flow
+
+After every successful classification, the event is indexed asynchronously in a background goroutine:
+
+<Steps>
+  <Step title="Build embedding text">
+    A composite string is formed from the most semantically meaningful fields of the event: `source`, `app_name`, `message`, `attack_type`, and MITRE `tactic`.
+
+    ```go
+    text := fmt.Sprintf("%s %s %s %s %s",
+        ev.Event.Source, ev.Event.AppName, ev.Event.Message,
+        ev.AttackType, ev.MITRE.Tactic)
+    ```
+  </Step>
+
+  <Step title="Generate embedding">
+    The text is sent to Ollama and returns a 768-dim `[]float32` vector within a 15-second timeout.
+  </Step>
+
+  <Step title="Upsert into Qdrant">
+    The vector is stored alongside a structured payload:
+
+    ```go
+    payload := map[string]any{
+        "event_id":     ev.Event.Raw[:min(32, len(ev.Event.Raw))],
+        "timestamp":    ev.ProcessedAt.Format(time.RFC3339),
+        "source":       ev.Event.Source,
+        "hostname":     ev.Event.Hostname,
+        "attack_type":  ev.AttackType,
+        "severity":     string(ev.Severity),
+        "summary":      ev.Summary,
+        "mitre_tactic": ev.MITRE.Tactic,
+    }
+    ```
+
+    The point ID is a deterministic FNV-64a hash of the event's identifier string, making upserts idempotent across restarts.
+  </Step>
+</Steps>
+
+## Search API
+
+### HTTP endpoint
+
+```
+GET /api/search?q=brute+force+SSH+login&limit=10
+GET /api/search?q=ransomware+encryption&limit=5&severity=P1
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `q` | string | required | Natural-language search query |
+| `limit` | integer | 10 | Maximum number of results to return |
+| `severity` | string | — | Optional filter: `P1` · `P2` · `P3` · `P4` · `P5` |
+
+### Search flow
+
+<Steps>
+  <Step title="Embed the query">
+    The query string is sent to Ollama (`nomic-embed-text`) and converted to a 768-dim vector.
+  </Step>
+
+  <Step title="Query Qdrant">
+    A nearest-neighbour search is issued against the `siem_events` collection. If a `severity` filter is provided, Qdrant applies a keyword match on the `severity` payload field before ranking:
+
+    ```go
+    func (a *APIStore) Search(
+        ctx context.Context,
+        queryVector []float32,
+        topK uint64,
+        severityFilter string,
+    ) ([]api.SearchResult, error) {
+        var filter *qd.Filter
+        if severityFilter != "" {
+            filter = &qd.Filter{
+                Must: []*qd.Condition{{
+                    ConditionOneOf: &qd.Condition_Field{
+                        Field: &qd.FieldCondition{
+                            Key: "severity",
+                            Match: &qd.Match{
+                                MatchValue: &qd.Match_Keyword{
+                                    Keyword: severityFilter,
+                                },
+                            },
+                        },
+                    },
+                }},
+            }
+        }
+        // ...
+    }
+    ```
+  </Step>
+
+  <Step title="Return ranked results">
+    Results are returned as `SearchHit` structs, sorted by descending cosine similarity score.
+  </Step>
+</Steps>
+
+### SearchHit response model
+
+```go
+// SearchHit is a single result from the semantic search endpoint.
+type SearchHit struct {
+    EventID     string   `json:"event_id"`
+    Timestamp   string   `json:"timestamp"`
+    Source      string   `json:"source"`
+    AttackType  string   `json:"attack_type"`
+    Severity    Severity `json:"severity"`
+    Summary     string   `json:"summary"`
+    MITRETactic string   `json:"mitre_tactic"`
+    Score       float32  `json:"score"`
+}
+```
+
+The `score` field is a cosine similarity value between 0.0 (completely dissimilar) and 1.0 (identical). In practice, scores above 0.75 indicate strong semantic similarity.
+
+## Similar events in the event detail panel
+
+The dashboard's event detail panel automatically runs a semantic search for the current event's summary and displays the top matching past events in a **"Similar events"** sidebar section. This requires no user action — the search fires when the detail panel opens.
+
+<Note>
+  The search endpoint returns `503 Service Unavailable` if Qdrant or Ollama is unreachable. Classification and the rest of the API remain fully functional — only the semantic search and indexing features degrade. Check the server logs for `qdrant upsert failed` or `embed failed` warnings.
+</Note>
+
+<Tip>
+  Use the `limit` parameter on `GET /api/search` to control how many similar events surface in the event detail panel. A `limit` of 3–5 keeps the panel focused on the most relevant matches; increase to 20 when doing bulk threat-hunting across your event history.
+</Tip>

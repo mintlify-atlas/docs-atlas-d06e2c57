@@ -1,0 +1,248 @@
+---
+title: "Autonomous incident investigation with the LLM agent"
+sidebarTitle: "Agent Investigation"
+description: "How Go SIEM Agent's tool-calling LLM loop investigates P1/P2 security events using MITRE lookup, AbuseIPDB, AlienVault OTX, and semantic event recall."
+---
+
+For P1 (Critical) and P2 (High) events, Go SIEM Agent automatically launches a bounded tool-calling LLM loop that enriches the incident with external threat intelligence and historical context, then synthesises a Markdown incident playbook. The agent runs in the background, emitting structured progress events over the `/ws/alerts` WebSocket hub so the dashboard can stream tool calls, intermediate findings, and the final verdict in real time.
+
+## The investigation loop
+
+The agent is implemented in `internal/agent/agent.go`. The loop is capped at `maxIterations = 8` to prevent a misbehaving LLM from running indefinitely:
+
+```go
+// maxIterations caps the tool-use loop so a misbehaving LLM cannot run forever.
+const maxIterations = 8
+```
+
+### System prompt
+
+Every investigation opens with a focused incident-responder persona and explicit playbook structure:
+
+```go
+const incidentSystemPrompt = `You are a senior security incident responder.
+You are given a classified security event. Use the available tools to enrich it
+with external threat intelligence and historical context, then write a concise
+incident playbook in Markdown with these sections:
+## Summary
+## Evidence
+## Threat Intel
+## Recommended Actions
+Call tools only when they add value. When you have enough information, stop
+calling tools and output the playbook.`
+```
+
+### Seed messages
+
+The user turn contains the classified event as a compact JSON object — attack type, MITRE mapping, severity, IOCs, summary, and the raw log line:
+
+```go
+func seedMessages(ev models.ClassifiedEvent) ([]openai.ChatCompletionMessage, error) {
+    userMsg, _ := json.Marshal(map[string]any{
+        "attack_type": ev.AttackType,
+        "mitre":       ev.MITRE,
+        "severity":    ev.Severity,
+        "iocs":        ev.IOCs,
+        "summary":     ev.Summary,
+        "raw_log":     ev.Event.Raw,
+    })
+    return []openai.ChatCompletionMessage{
+        {Role: openai.ChatMessageRoleSystem, Content: incidentSystemPrompt},
+        {Role: openai.ChatMessageRoleUser,   Content: string(userMsg)},
+    }, nil
+}
+```
+
+### Blocking vs. streaming
+
+`RunIncident` runs the tool loop synchronously and returns the final playbook string. `RunIncidentStream` runs the same enrichment loop but emits `AgentEvent` frames via a `send` callback at each tool call, tool result, and playbook chunk:
+
+```go
+// AgentEvent is a single update emitted during a streaming investigation.
+// Type is one of: tool_call, tool_result, chunk, done, error.
+type AgentEvent struct {
+    Type string `json:"type"`
+    Data string `json:"data"`
+}
+```
+
+The streaming variant calls `synthesize` at the end — a final LLM completion with tools disabled — to produce the playbook prose token by token as `chunk` events, followed by a terminal `done` event.
+
+<Warning>
+  Each investigation runs inside a `context.WithTimeout` with a **2-minute** deadline. If the LLM or external APIs are slow, the context is cancelled, the loop exits, and any playbook fragments gathered so far are broadcast as a partial result. The `done` or `error` event always fires so the dashboard can close the loading state.
+</Warning>
+
+## Tool registry
+
+Tools are registered in a `Registry` and dispatched by name. Every tool implements the `Tool` interface:
+
+```go
+type Tool interface {
+    Name() string
+    Description() string
+    // Schema is the JSON Schema for the tool's arguments object.
+    Schema() json.RawMessage
+    // Execute runs the tool and returns a compact string for the LLM to read.
+    Execute(ctx context.Context, input json.RawMessage) (string, error)
+}
+```
+
+Tools are registered at startup and retrieved concurrently:
+
+```go
+// Register adds a tool, keyed by its Name.
+func (r *Registry) Register(t Tool) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    r.tools[t.Name()] = t
+}
+
+// Dispatch runs the named tool with the given input.
+func (r *Registry) Dispatch(ctx context.Context, name string, input json.RawMessage) (string, error) {
+    r.mu.RLock()
+    t, ok := r.tools[name]
+    r.mu.RUnlock()
+    if !ok {
+        return "", fmt.Errorf("unknown tool %q", name)
+    }
+    out, err := t.Execute(ctx, input)
+    // ...
+    return out, nil
+}
+```
+
+`Registry.OpenAITools()` converts all registered tools to `openai.Tool` structs (sorted alphabetically for deterministic prompts) and passes them to every `CreateChatCompletion` request in the loop.
+
+## Agent tools
+
+<CardGroup cols={2}>
+  <Card title="MITRE Lookup" icon="shield-halved">
+    **Tool name:** `lookup_mitre`
+
+    Resolves a MITRE ATT&CK technique ID (e.g. `T1110.001`) against a curated local subset of 18 techniques. Returns the technique name, tactic, and a detection recommendation. Requires no API key and works fully offline.
+  </Card>
+  <Card title="AbuseIPDB" icon="globe">
+    **Tool name:** `check_abuseipdb`
+
+    Checks an IP address's reputation via the AbuseIPDB v2 API. Returns abuse confidence score (0–100), country code, ISP, total reports, and last reported date. Requires the `ABUSEIPDB_KEY` environment variable; degrades gracefully if absent.
+  </Card>
+  <Card title="AlienVault OTX" icon="radar">
+    **Tool name:** `check_otx`
+
+    Queries AlienVault OTX for threat-intel pulses associated with an IP, domain, or file hash. Returns pulse count, threat labels, adversary names, and the most recent pulse. Requires the `OTX_API_KEY` environment variable; degrades gracefully if absent.
+  </Card>
+  <Card title="Similar Events" icon="magnifying-glass">
+    **Tool name:** `search_similar_events`
+
+    Embeds a natural-language incident description with Ollama and runs a semantic nearest-neighbour search in Qdrant. Returns up to 20 past events ranked by cosine similarity, giving the agent historical precedent to reason over.
+  </Card>
+</CardGroup>
+
+### MITRE Lookup (`lookup_mitre`)
+
+```go
+// MITRELookup returns local ATT&CK detail for a technique ID. No API key needed.
+func (MITRELookup) Execute(_ context.Context, input json.RawMessage) (string, error) {
+    // Resolves technique ID from a 18-entry local ATT&CK subset.
+    // Returns: technique_id, technique, tactic, detection
+}
+```
+
+Example output:
+```json
+{
+  "technique_id": "T1110",
+  "technique": "Brute Force",
+  "tactic": "Credential Access",
+  "detection": "Alert on repeated failed logins from one source."
+}
+```
+
+### AbuseIPDB (`check_abuseipdb`)
+
+```go
+func NewAbuseIPDB(apiKey string, client *http.Client) *AbuseIPDB
+```
+
+The tool validates the IP with `net.ParseIP` and skips private/loopback addresses with a `note` rather than making an external call (SSRF protection). A per-process call counter caps usage at 3 000 requests per day to stay within the free-tier API budget.
+
+Example output:
+```json
+{
+  "ip": "45.33.32.156",
+  "abuse_score": 87,
+  "country": "US",
+  "isp": "Linode, LLC",
+  "total_reports": 312,
+  "last_reported": "2024-11-15T03:22:10+00:00"
+}
+```
+
+### AlienVault OTX (`check_otx`)
+
+```go
+func NewOTX(apiKey string, client *http.Client) *OTX
+```
+
+Accepts `type` values of `"ip"`, `"domain"`, or `"hash"`. Private and loopback IPs are skipped. The tool summarises pulse data into a compact JSON with `pulse_count`, `threat_labels` (union of all tags and adversary names), `recent_pulse`, and `recent_date`.
+
+Example output:
+```json
+{
+  "indicator": "45.33.32.156",
+  "pulse_count": 7,
+  "threat_labels": ["scanner", "mirai", "botnet"],
+  "recent_pulse": "Mirai Botnet C2 IPs",
+  "recent_date": "2024-10-01T12:00:00Z"
+}
+```
+
+### Similar Events (`search_similar_events`)
+
+```go
+func NewSimilarEvents(embed Embedder, search VectorSearcher) *SimilarEvents
+```
+
+Accepts a `query` string and an optional `limit` (default 5, max 20). Embeds the query with Ollama and performs a Qdrant similarity search, returning a JSON array of matching past events with their attack type, severity, summary, MITRE tactic, and similarity score.
+
+## Streaming over WebSocket
+
+The streaming investigation loop emits `AgentEvent` frames via the `send` callback. In the production server, `send` is wired to the WebSocket hub's broadcast channel. Each frame is a JSON-encoded `AgentEvent`:
+
+| `type` | `data` content |
+|--------|---------------|
+| `tool_call` | JSON with `name` and `input` — identifies which tool was invoked and with what arguments |
+| `tool_result` | Raw tool output string returned to the LLM |
+| `chunk` | Single token from the streaming playbook synthesis |
+| `done` | Empty — signals investigation complete |
+| `error` | Error message string — investigation aborted |
+
+In the dashboard, the **alert ticker** at the top of the app shows a live entry for each active investigation. Clicking the entry opens the **incident overlay**, which replays all tool calls and results as an activity feed and streams the final playbook Markdown as it is generated.
+
+## Playbook output format
+
+The final synthesised playbook follows a four-section Markdown structure mandated by the system prompt:
+
+```markdown
+## Summary
+Brief description of what happened and why it is significant.
+
+## Evidence
+- Raw log line and parsed fields
+- IOCs extracted (IPs, hashes, domains)
+- Confidence score and MITRE mapping
+
+## Threat Intel
+- AbuseIPDB reputation score for attacker IP
+- OTX pulse data and threat labels
+- Historical similar events from Qdrant
+
+## Recommended Actions
+1. Immediate containment steps
+2. Investigation steps
+3. Long-term hardening recommendations
+```
+
+<Tip>
+  Even without `ABUSEIPDB_KEY` or `OTX_API_KEY` configured, the agent still provides meaningful investigation output using the offline MITRE lookup and Qdrant similar-event recall. The two external tools gracefully return a `note` field instead of an error, so the LLM can acknowledge the missing data and continue building the playbook.
+</Tip>

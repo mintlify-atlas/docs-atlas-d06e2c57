@@ -1,0 +1,275 @@
+---
+title: "Go SIEM Agent architecture and data flow"
+sidebarTitle: "Architecture"
+description: "How Go SIEM Agent connects the Go HTTP server, LLM classifier, Qdrant vector DB, Ollama embeddings, and React dashboard into a real-time SIEM pipeline."
+---
+
+Go SIEM Agent is composed of six distinct layers — a React frontend, a Chi-based Go HTTP server, an LLM classifier, a vector store, an embeddings service, and a relational database — wired together into a single cohesive pipeline that takes a raw log line as input and produces structured threat intelligence, persisted vector embeddings, and a live WebSocket incident stream as output. Each layer is independently replaceable: the LLM provider, vector database, and embeddings model are all abstracted behind interfaces, so tests can inject mocks and production deployments can swap providers without touching application logic.
+
+## Architecture diagram
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    React Dashboard                       │
+│         (Vite dev :5173 → proxies /api → :8080)        │
+└───────────────────────┬─────────────────────────────────┘
+                        │ HTTP / SSE / WebSocket
+┌───────────────────────▼─────────────────────────────────┐
+│                   Go HTTP Server :8080                   │
+│   Chi router · Rate limiter · CORS · Security headers   │
+│                                                         │
+│  POST /api/classify      → LLM classify single log      │
+│  POST /api/classify/stream → SSE streaming classify     │
+│  POST /api/ingest        → Batch classify + store       │
+│  GET  /api/search        → Semantic vector search       │
+│  GET  /api/analytics/summary → Charts data              │
+│  GET  /ws/alerts         → Live incident WebSocket      │
+│  GET  /metrics           → Prometheus                   │
+│  GET  /docs              → Swagger UI                   │
+│                                                         │
+│  Agent (Phase 3): LLM tool loop → sanitize → WS hub     │
+│    tools: MITRE · AbuseIPDB · OTX · similar events      │
+└───┬───────────────┬─────────────────┬───────────────────┘
+    │               │                 │
+    ▼               ▼                 ▼
+┌───────┐    ┌──────────┐    ┌──────────────┐
+│Kimchi │    │  Qdrant  │    │    Ollama    │
+│  LLM  │    │ Vector DB│    │  Embeddings  │
+│  API  │    │  :6334   │    │   :11434     │
+└───────┘    └──────────┘    └──────────────┘
+```
+
+## Component reference
+
+### Go HTTP server (`internal/api`, `:8080`)
+
+The HTTP server is built on the [Chi](https://github.com/go-chi/chi) router and assembled by `api.New()`. The middleware stack is applied in this order:
+
+1. `middleware.RequestID` — attaches a unique request ID to every request context
+2. `middleware.RealIP` — resolves the real client IP from proxy headers
+3. `slogRequestLogger` — structured JSON request logging via `log/slog`
+4. `middleware.Recoverer` — catches panics and returns a 500 response
+5. `newRateLimiter(100)` — per-IP token-bucket rate limiter (100 req/s); state is cleaned up every five minutes
+6. `securityHeaders` — sets `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, and `Content-Security-Policy`
+7. `corsMiddleware` — configures `Access-Control-Allow-Origin` from `ALLOWED_ORIGIN`, allowing `GET`, `POST`, and `OPTIONS`
+
+All routes:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/classify` | Classify a single log line; triggers agent for P1/P2 |
+| `POST` | `/api/classify/stream` | Same as above but streams LLM tokens via SSE |
+| `POST` | `/api/ingest` | Batch classify up to 500 log lines; stores in Qdrant + PostgreSQL |
+| `GET` | `/api/search` | Semantic vector search (`?q=...&limit=10&severity=P1`) |
+| `GET` | `/api/analytics/summary` | Attack counts, severity distribution, 6h timeline, MITRE breakdown |
+| `GET` | `/ws/alerts` | WebSocket endpoint — live incident/agent event stream |
+| `GET` | `/health` | Liveness probe: `{"status":"ok"}` |
+| `GET` | `/health/ready` | Readiness probe |
+| `GET` | `/metrics` | Prometheus metrics |
+| `GET` | `/docs` | Swagger UI |
+| `GET` | `/docs/openapi.yaml` | Raw OpenAPI spec |
+
+### Classifier (`internal/classifier`)
+
+The classifier wraps the OpenAI-compatible client. On every `Classify()` call it constructs a security-analysis system prompt and sends the serialised `LogEvent` as the user message. The LLM is expected to return a JSON object matching the `LLMAnalysis` struct:
+
+```go
+type LLMAnalysis struct {
+    AttackType  string   `json:"attack_type"`
+    Tactic      string   `json:"tactic"`
+    TechniqueID string   `json:"technique_id"`
+    Technique   string   `json:"technique"`
+    Severity    string   `json:"severity"`
+    Confidence  float64  `json:"confidence"`
+    IOCs        []string `json:"iocs"`
+    Remediation string   `json:"remediation"`
+    Summary     string   `json:"summary"`
+}
+```
+
+The classifier wraps this into a `ClassifiedEvent` and, when indexing is enabled via `WithIndexing(embedder, store)`, concurrently generates an Ollama embedding and writes it to Qdrant. The `ClassifyStream()` method uses the SSE streaming API and invokes a callback for each token chunk.
+
+### Parser (`internal/parser`)
+
+The parser normalises heterogeneous log formats into a consistent `LogEvent` struct. Three formats are supported natively:
+
+- **RFC 5424 syslog** — full structured syslog with PRI, version, timestamp, hostname, app-name, proc-ID, and message fields
+- **RFC 3164 syslog** — BSD syslog with PRI, timestamp, hostname, and message
+- **JSON** — any valid JSON object is unmarshalled directly
+- **Raw** — plain strings are wrapped in a `LogEvent` with `source: "raw"`
+
+When `format: "auto"` is specified (the default), the parser tries each format in priority order and falls back to raw.
+
+### Worker pool (`internal/pipeline`)
+
+The `WorkerPool` is used in CLI mode and by the `/api/ingest` batch endpoint. It creates a configurable number of goroutines (default: 5, set via `--workers` flag or `cfg.Workers`) that pull `LogEvent` values from a shared channel, call `Classify()`, and push `ClassifiedEvent` results to an output channel. This allows large log files to be classified concurrently without blocking.
+
+### Qdrant vector database (`pkg/qdrant`, port 6334)
+
+Qdrant provides persistent vector storage for semantic search. The `APIStore` client connects over gRPC and manages a collection named `siem_events` with 768-dimensional float32 vectors. Each point's payload stores the full `ClassifiedEvent` metadata for retrieval without a secondary database lookup.
+
+Key operations:
+- `EnsureCollection(ctx, 768)` — creates the collection if it does not exist, called once at startup
+- `Store(ctx, vector, payload)` — indexes a new event
+- `Search(ctx, queryVector, topK, severityFilter)` — returns the top-K nearest neighbours; the optional `severityFilter` narrows results to a specific P1–P5 tier
+
+<Warning>
+  Qdrant is optional. If the gRPC connection fails at startup, the server logs `Qdrant unavailable, semantic search disabled` and continues without semantic indexing. The `/api/search` endpoint will return empty results in this state.
+</Warning>
+
+### Ollama embeddings (`pkg/ollama`, port 11434)
+
+The `Embedder` client calls Ollama's `/api/embeddings` endpoint with model `nomic-embed-text` to produce 768-dimensional float32 vectors. It is used in two places:
+
+1. **Indexing** — immediately after classification, to embed the event for storage in Qdrant
+2. **Search** — to embed the user's query text before calling `qdrant.Search()`
+
+The model must be pulled once with `make pull-models` before the first use.
+
+### Agent (`internal/agent`)
+
+The agent implements a synchronous tool-calling LLM loop for Phase 3 investigation. When `maybeInvestigate` is triggered for a P1 or P2 event, `agent.RunIncidentStream` is launched in a background goroutine with a two-minute context timeout. The agent has access to a `Registry` of tools:
+
+| Tool | Package | Description |
+|------|---------|-------------|
+| `MITRELookup` | `internal/agent/tools` | Queries the MITRE ATT&CK knowledge base for tactic/technique details |
+| `AbuseIPDB` | `internal/agent/tools` | Checks IP addresses against AbuseIPDB's reputation database (requires `ABUSEIPDB_KEY`) |
+| `OTX` | `internal/agent/tools` | Fetches threat intelligence from AlienVault OTX (requires `OTX_API_KEY`) |
+| `SimilarEvents` | `internal/agent/tools` | Embeds the event text and recalls the top similar past events from Qdrant |
+
+Each tool invocation emits an `AgentEvent` frame (`type`, `data`) that is broadcast over the WebSocket hub.
+
+### WebSocket hub (`internal/api/hub`)
+
+`Hub` is a goroutine-safe broadcast bus. It maintains a map of connected WebSocket clients and serialises outgoing messages through a channel to avoid concurrent write races. When `hub.Broadcast(msg)` is called, every currently connected client receives the JSON-encoded `AgentEvent` frame.
+
+The React frontend connects to `/ws/alerts` and uses the `useAlertStream` hook to reduce the incoming stream into incident state. Each incident is identified by an `incident_id` field; frames are merged into a running incident record that drives the alert-ticker and incident-overlay components.
+
+### React dashboard (`web/`)
+
+The frontend is a Vite + React 19 + TypeScript application. In development mode, the Vite dev server listens on `:5173` and proxies all `/api` requests to `http://localhost:8080`, so there is no cross-origin issue.
+
+Key structure:
+
+```
+web/src/
+├── components/      # EventCard, AlertTicker, MITREHeatmap, ThreatIntelPanel, ...
+├── hooks/           # useAlertStream — WebSocket incident state reducer
+├── lib/             # API client (fetch + SSE helpers)
+├── pages/           # Dashboard, Search, Docs, Incident
+└── __tests__/       # Vitest + Testing Library unit tests
+```
+
+The dashboard layout adapts across three breakpoints:
+
+| Breakpoint | Layout |
+|---|---|
+| Mobile (< 768px) | Hamburger sidebar, tab bar (Events / Analytics), bottom-sheet event detail |
+| Tablet (768–1280px) | Collapsible sidebar, full event list, detail panel as overlay |
+| Desktop (> 1280px) | Three-column layout — sidebar + events + detail/analytics panel |
+
+### PostgreSQL (port 5433)
+
+PostgreSQL 16 persists classified events when `POSTGRES_DSN` is configured. The Docker Compose service maps the container's port 5432 to the host's port 5433 to avoid conflicts with any locally-running PostgreSQL instance. The connection string in `.env.example` reflects this:
+
+```env
+POSTGRES_DSN=postgres://siemagent:siemagent@localhost:5432/siemagent?sslmode=disable
+```
+
+### Prometheus metrics (`/metrics`)
+
+The `/metrics` endpoint exposes standard Go runtime metrics plus any application-level counters registered in `internal/metrics`. It is compatible with Grafana's Prometheus data source for dashboarding and alerting.
+
+## Project directory structure
+
+```
+go-siem-agent-llm-classifier/
+├── siemagent/
+│   ├── cmd/siemagent/        # Main entrypoint — CLI flags, server wiring, graceful shutdown
+│   ├── internal/
+│   │   ├── agent/            # LLM tool-calling agent + tools (MITRE, AbuseIPDB, OTX, similar events)
+│   │   ├── api/              # HTTP handlers, router, WebSocket hub + sanitizer, middleware
+│   │   ├── classifier/       # LLM-based event classifier (classify + classifyStream)
+│   │   ├── config/           # Environment config loader (config.Load())
+│   │   ├── metrics/          # Prometheus counters and histograms
+│   │   ├── models/           # Shared data models (LogEvent, ClassifiedEvent, MITREInfo, …)
+│   │   ├── parser/           # RFC 5424, RFC 3164, JSON, raw log parsers
+│   │   ├── pipeline/         # Concurrent worker pool for batch ingestion
+│   │   └── store/            # In-memory EventStore (thread-safe, used by analytics)
+│   ├── pkg/
+│   │   ├── ollama/           # Ollama embeddings client (nomic-embed-text)
+│   │   └── qdrant/           # Qdrant gRPC client + APIStore adapter
+│   ├── web/                  # React 19 + Vite frontend
+│   │   ├── e2e/              # Playwright end-to-end tests
+│   │   └── src/              # Components, hooks, pages, tests
+│   ├── docker-compose.yml    # Qdrant + PostgreSQL + Ollama services
+│   ├── Makefile              # All dev commands (see `make help`)
+│   ├── sample.log            # Sample log file for CLI mode
+│   └── test-logs.log         # 30-line mixed-severity test file
+└── README.md
+```
+
+## Graceful shutdown
+
+The HTTP server handles `SIGINT` and `SIGTERM` via `signal.Notify`. On receipt of either signal, a background goroutine calls `srv.HTTPServer().Shutdown(ctx)` with a 15-second drain context. In-flight HTTP requests and WebSocket connections are given up to 15 seconds to complete before the process exits.
+
+```go
+stop := make(chan os.Signal, 1)
+signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+go func() {
+    <-stop
+    ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+    defer cancel()
+    srv.HTTPServer().Shutdown(ctx)
+}()
+```
+
+This ensures that batch ingestion jobs and in-progress agent investigations are not abruptly cut off during deployments or container restarts.
+
+## Related concepts
+
+<CardGroup cols={2}>
+  <Card
+    title="Classification Pipeline"
+    icon="diagram-project"
+    href="/concepts/classification-pipeline"
+  >
+    Deep dive into the LLM prompt design, JSON schema enforcement, and error handling inside the classifier.
+  </Card>
+  <Card
+    title="Severity Model"
+    icon="triangle-exclamation"
+    href="/concepts/severity-model"
+  >
+    How P1–P5 severity tiers are determined, displayed, and used to trigger automated investigation.
+  </Card>
+  <Card
+    title="MITRE ATT&CK Mapping"
+    icon="shield-halved"
+    href="/concepts/mitre-attack-mapping"
+  >
+    How every event is mapped to a tactic and technique ID, with links to the MITRE knowledge base.
+  </Card>
+  <Card
+    title="Semantic Search"
+    icon="magnifying-glass"
+    href="/concepts/semantic-search"
+  >
+    Vector embedding pipeline, Qdrant collection schema, and similarity search query path.
+  </Card>
+  <Card
+    title="Agent Investigation"
+    icon="robot"
+    href="/concepts/agent-investigation"
+  >
+    The Phase 3 tool-calling loop, tool registry, event sanitization, and WebSocket broadcast protocol.
+  </Card>
+  <Card
+    title="Dashboard Overview"
+    icon="gauge-high"
+    href="/dashboard/overview"
+  >
+    React dashboard layout, component hierarchy, WebSocket state management, and responsive breakpoints.
+  </Card>
+</CardGroup>

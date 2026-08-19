@@ -1,0 +1,123 @@
+---
+title: "Monitor live security incidents in real time"
+sidebarTitle: "Live Incidents"
+description: "How Go SIEM Agent streams P1/P2 incident investigations over WebSocket to the alert ticker and incident overlay in the React dashboard."
+---
+
+Every P1 Critical or P2 High event classified by Go SIEM Agent automatically triggers an autonomous agent investigation. The agent runs a multi-step LLM tool-calling loop — looking up MITRE techniques, querying IP reputation, pulling AlienVault OTX threat intel, and recalling similar past events — and streams its live progress to every connected dashboard over WebSocket. No manual refresh is ever needed: the alert ticker and incident overlay update in real time as the agent works.
+
+## How the WebSocket flow works
+
+The end-to-end flow from classification to the dashboard is:
+
+1. **Classification** — a log line is classified as P1 or P2 by the LLM classifier.
+2. **Agent launch** — the `maybeInvestigate` function checks severity and launches a goroutine running the agent loop.
+3. **Tool calls** — the agent iteratively calls tools: `lookup_mitre`, `check_abuseipdb`, `check_otx`, and `similar_events`. Each tool call and its result is emitted as an `AgentEvent` frame.
+4. **Sanitisation & broadcast** — each frame is sanitised (PII and sensitive fields are stripped) before being broadcast via the WebSocket Hub to all clients connected to `/ws/alerts`.
+5. **React hook** — the `useAlertStream` hook receives frames, folds them into the incident map using a pure `apply` reducer, and updates React state.
+6. **UI update** — the alert ticker shows a new entry (or updates an existing one); clicking an entry opens the full incident overlay.
+
+## WebSocket frame format
+
+Each frame broadcast on `/ws/alerts` is a JSON-encoded `AgentEvent`:
+
+```json
+{
+  "incident_id": "a1b2c3d4",
+  "event_id": "2024-01-15T10:30:01.123Z",
+  "type": "tool_call",
+  "data": "{\"name\":\"lookup_mitre\",\"input\":{\"technique_id\":\"T1110\"}}"
+}
+```
+
+### AgentEvent types
+
+| Type | Meaning |
+|---|---|
+| `tool_call` | Agent is about to call a tool — `data` contains `{"name": "...", "input": {...}}` |
+| `tool_result` | Tool returned a result — `data` is the raw JSON result string |
+| `chunk` | A fragment of the synthesised playbook — `data` is a markdown string chunk |
+| `done` | Investigation complete — incident status transitions to `complete` |
+| `error` | Investigation failed — incident status transitions to `failed` |
+
+## The `useAlertStream` hook
+
+The `useAlertStream` hook (`src/hooks/useAlertStream.ts`) manages the WebSocket connection and reduces incoming frames into a `Map<string, Incident>`:
+
+```typescript
+export function useAlertStream(url: string = defaultURL()) {
+  const [connected, setConnected] = useState(false)
+  const [incidents, setIncidents] = useState<Map<string, Incident>>(new Map())
+  const [latestEvent, setLatestEvent] = useState<AgentEvent | null>(null)
+  // ...
+  ws.onmessage = (e) => {
+    const ev = safeParse(e.data) as AgentEvent
+    if (!ev.incident_id) return
+    setLatestEvent(ev)
+    setIncidents((m) => apply(m, ev))
+  }
+}
+```
+
+The hook automatically reconnects with exponential back-off (starting at 1 second, capped at 30 seconds) if the WebSocket closes unexpectedly. The `defaultURL()` helper derives the correct `ws://` or `wss://` URL from `window.location`, so the hook works in both development and production without any configuration.
+
+Each `Incident` object maintained by the hook has this shape:
+
+```typescript
+interface Incident {
+  id: string           // incident_id from frames
+  eventId: string      // the originating classified event ID
+  status: 'investigating' | 'complete' | 'failed'
+  tools: ToolInvocation[]   // ordered list of tool calls + results
+  playbook: string     // accumulated playbook markdown chunks
+}
+```
+
+## Alert ticker
+
+The `AlertTicker` component renders a fixed banner at the top of the viewport — one entry per active or recently-completed incident. Each entry displays:
+
+- A red `INCIDENT` badge with pulse animation
+- The incident ID in monospace
+- A status indicator:
+  - 🔄 Spinning orange — `investigating`
+  - ✅ Green check — `complete`
+  - ⚠️ Red triangle — `failed`
+
+Clicking any banner entry opens the **incident overlay** for that investigation.
+
+## Incident overlay
+
+The incident overlay (`Incident` page component) is a two-column panel:
+
+### Left column — tool timeline & threat intel
+
+An ordered list of every tool the agent called, rendered as collapsible `<details>` elements. Each item shows the tool name, its input arguments, and the result returned:
+
+```
+▸ lookup_mitre
+  {"technique_id": "T1110"}
+  → {"tactic": "Credential Access", "technique": "Brute Force", ...}
+```
+
+Below the tool timeline, the **ThreatIntelPanel** component renders enriched cards for any `check_abuseipdb` or `check_otx` results — showing abuse confidence score, country, ISP, report count (AbuseIPDB) or pulse count and threat labels (OTX).
+
+### Right column — live playbook
+
+The synthesised investigation playbook streams in as `chunk` frames arrive. The panel renders the accumulated markdown in a monospace block and updates live — no page refresh needed. A **Copy Playbook** button lets you copy the full playbook to the clipboard once the investigation is complete.
+
+<Warning>
+  The agent investigation has a **2-minute timeout per event**. If the LLM tool loop does not reach a verdict within 120 seconds, the incident is marked `failed` and a final error frame is broadcast. You can adjust the timeout in the agent configuration.
+</Warning>
+
+## Observing raw frames
+
+<Tip>
+  Connect directly to the WebSocket endpoint to see the raw frame stream, for example with `websocat`:
+
+  ```bash
+  websocat ws://localhost:8080/ws/alerts
+  ```
+
+  Each line of output is one JSON-encoded `AgentEvent`. This is useful for debugging agent behaviour or verifying that a particular investigation is progressing.
+</Tip>

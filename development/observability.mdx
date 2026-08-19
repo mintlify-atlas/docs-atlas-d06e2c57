@@ -1,0 +1,175 @@
+---
+title: "Monitor Go SIEM Agent with Prometheus and health checks"
+sidebarTitle: "Observability"
+description: "Expose and query Prometheus metrics, use liveness and readiness health probes, and integrate Go SIEM Agent with Grafana for production monitoring."
+---
+
+When running in server mode, `siemagent` exposes a Prometheus metrics endpoint, liveness and readiness health probes, a Swagger UI for interactive API exploration, and structured `log/slog` output on every request — all production-ready from the first `make serve`.
+
+---
+
+## Prometheus Metrics
+
+The `/metrics` endpoint serves the full default Go runtime metrics (GC, goroutines, memory) plus three custom application metrics registered at startup.
+
+### Endpoint
+
+```
+GET http://localhost:8080/metrics
+```
+
+The response is standard Prometheus text format. Point your Prometheus scrape config at this URL:
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: siemagent
+    static_configs:
+      - targets: ["localhost:8080"]
+```
+
+Then import the scraped data into Grafana for dashboards and alerting.
+
+### Custom metrics
+
+<CardGroup cols={1}>
+  <Card title="events_classified_total" icon="chart-bar">
+    **Type:** Counter  
+    **Labels:** `severity`, `attack_type`  
+    **Description:** Total number of log events classified since the server started. Broken out by severity level (P1–P5) and attack type string returned by the LLM (e.g. `Brute Force`, `Port Scan`, `Ransomware`). Use this to plot classification throughput and spot spikes in specific attack categories.
+  </Card>
+  <Card title="classification_duration_seconds" icon="clock">
+    **Type:** Histogram  
+    **Buckets:** 0.1, 0.5, 1, 2, 5, 10 seconds  
+    **Description:** End-to-end latency of each LLM classification call, from the moment the event enters the classifier to when the structured result is returned. Use the `_bucket` series to calculate percentiles (p50, p95, p99) in Grafana.
+  </Card>
+  <Card title="llm_stream_errors_total" icon="triangle-exclamation">
+    **Type:** Counter  
+    **Description:** Total number of errors from the LLM streaming API (`/api/classify/stream`). Incremented whenever the SSE token stream returns an error mid-response. Alert on a non-zero rate to detect LLM provider instability.
+  </Card>
+</CardGroup>
+
+### Example metric output
+
+```
+# HELP events_classified_total Total number of classified events by severity and attack type.
+# TYPE events_classified_total counter
+events_classified_total{attack_type="Brute Force",severity="P2"} 87
+events_classified_total{attack_type="Port Scan",severity="P3"} 34
+events_classified_total{attack_type="Ransomware",severity="P1"} 3
+
+# HELP classification_duration_seconds Duration of log event classification in seconds.
+# TYPE classification_duration_seconds histogram
+classification_duration_seconds_bucket{le="0.1"} 2
+classification_duration_seconds_bucket{le="0.5"} 18
+classification_duration_seconds_bucket{le="1"} 54
+classification_duration_seconds_bucket{le="2"} 79
+classification_duration_seconds_bucket{le="5"} 87
+classification_duration_seconds_bucket{le="10"} 87
+classification_duration_seconds_bucket{le="+Inf"} 87
+classification_duration_seconds_sum 63.4
+classification_duration_seconds_count 87
+
+# HELP llm_stream_errors_total Total number of errors from the LLM streaming API.
+# TYPE llm_stream_errors_total counter
+llm_stream_errors_total 0
+```
+
+---
+
+## Health Endpoints
+
+The server exposes two health routes suitable for Kubernetes liveness and readiness probes (or any load-balancer health check).
+
+### Liveness probe — `GET /health`
+
+Returns immediately with HTTP 200 and a static JSON body. This probe never blocks on external dependencies — if the Go process is alive and the HTTP server is accepting connections, it returns `ok`.
+
+```bash
+curl http://localhost:8080/health
+```
+
+```json
+{"status": "ok"}
+```
+
+### Readiness probe — `GET /health/ready`
+
+Actively checks downstream dependencies before responding. Returns HTTP 200 when all configured dependencies are reachable, or **HTTP 503** if any dependency is unreachable. Results are cached for 10 seconds to avoid hammering the LLM and Qdrant on every probe interval.
+
+```bash
+curl http://localhost:8080/health/ready
+```
+
+**All dependencies healthy (HTTP 200):**
+
+```json
+{
+  "status": "ready",
+  "checks": {
+    "llm": "ok",
+    "qdrant": "ok"
+  }
+}
+```
+
+**LLM unreachable (HTTP 503):**
+
+```json
+{
+  "status": "not ready",
+  "checks": {
+    "llm": "error: dial tcp: connection refused",
+    "qdrant": "ok"
+  }
+}
+```
+
+### What the readiness probe checks
+
+| Check | How | Timeout | When included |
+|---|---|---|---|
+| `llm` | Calls `classifier.Ping()` — a lightweight request to the configured LLM endpoint | 5 seconds | Always |
+| `qdrant` | TCP dial to the configured `QDRANT_ADDR` | 2 seconds | Only when `QDRANT_ADDR` env var is set |
+
+---
+
+## Swagger UI
+
+Interactive API documentation is served directly by the binary — no external hosting required.
+
+```
+GET http://localhost:8080/docs
+```
+
+Open this URL in a browser to explore all endpoints, inspect request/response schemas, and send live requests to the running server. The raw OpenAPI spec is available at `/docs/openapi.yaml` for import into Postman or other tooling.
+
+---
+
+## Structured Logging
+
+The server uses Go's standard `log/slog` package throughout. Every log line is emitted in structured key-value format with a `component` tag that identifies which part of the system produced it. The request logger middleware records method, path, HTTP status, latency in milliseconds, and the chi-generated `request_id` for every inbound request.
+
+### Example log output
+
+```
+INFO  SIEMAgent HTTP server starting  addr=:8080
+INFO  Qdrant connected, semantic search enabled  component=main
+INFO  agent tool registry ready  component=main  tools=3
+INFO  request  component=api  method=POST  path=/api/classify  status=200  latency_ms=1234  request_id=abc123
+INFO  request  component=api  method=GET   path=/api/search    status=200  latency_ms=45    request_id=def456
+INFO  agent tool result  tool=lookup_abuseipdb  output_bytes=512
+WARN  Qdrant unavailable, semantic search disabled  component=main  error=dial tcp: connection refused
+ERROR classification failed  component=api  error=context deadline exceeded
+```
+
+Log lines from different components can be correlated by `request_id` — the same ID that chi's `middleware.RequestID` injects into every request context and the `slogRequestLogger` middleware emits at response time.
+
+<Tip>
+  Use the `request_id` field to trace a single classification request across all log lines it generates. If the LLM call is slow or the agent investigation fires, every log line produced during that request shares the same `request_id` value — making it straightforward to filter with `grep` or a log aggregation tool like Loki:
+
+  ```bash
+  # Follow live logs and filter to a single request
+  ./bin/siemagent --serve 2>&1 | grep request_id=abc123
+  ```
+</Tip>

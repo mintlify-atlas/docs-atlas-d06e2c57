@@ -1,0 +1,150 @@
+---
+title: "Run tests for Go SIEM Agent backend and frontend"
+sidebarTitle: "Testing"
+description: "Run Go unit tests with race detection, integration tests against Qdrant, and React frontend tests with Vitest and Playwright end-to-end tests."
+---
+
+The project has three independent layers of tests: **Go backend unit tests** (run with the race detector), **Go integration tests** that exercise real Qdrant connectivity, and **React frontend tests** split between Vitest component unit tests and Playwright end-to-end tests. Each layer can be run in isolation, so you can iterate on the backend or frontend without spinning up the full stack.
+
+---
+
+## Go Backend Tests
+
+All Go tests live under `siemagent/` and are driven by Makefile targets. From the `siemagent/` directory:
+
+```bash
+cd siemagent
+
+make test                  # Go unit tests with -race flag and 60s timeout
+make test-integration      # Integration tests requiring Qdrant (120s timeout)
+make vet                   # go vet
+make lint                  # golangci-lint (auto-installs if missing)
+```
+
+The Makefile translates these targets to the following `go test` commands:
+
+```bash
+# make test
+go test ./... -v -race -timeout 60s
+
+# make test-integration
+go test -tags integration ./... -v -timeout 120s
+
+# make vet
+go vet ./...
+
+# make lint  (installs golangci-lint automatically if not on PATH)
+golangci-lint run ./...
+```
+
+### Tested packages
+
+<CardGroup cols={2}>
+  <Card title="internal/agent" icon="robot">
+    Agent loop logic and tool-calling orchestration — covers the LLM tool dispatch cycle and the `Registry` that registers MITRE, AbuseIPDB, OTX, and similar-event tools.
+  </Card>
+  <Card title="internal/api" icon="server">
+    HTTP handlers, the WebSocket hub, the classify/ingest request validators, the sanitizer that scrubs agent output before broadcast, and middleware behaviour.
+  </Card>
+  <Card title="internal/classifier" icon="brain">
+    LLM classifier logic — structured JSON output parsing, streaming token assembly, and the `Ping` reachability check used by the readiness probe.
+  </Card>
+  <Card title="internal/parser" icon="file-lines">
+    Syslog RFC 5424 and JSON log parsers — field extraction, format auto-detection, and edge cases such as malformed priorities or missing timestamps.
+  </Card>
+  <Card title="pkg/ollama" icon="microchip">
+    Ollama embedding client — `Embed` call serialisation, error handling, and the HTTP round-trip against the configured `OLLAMA_URL`.
+  </Card>
+  <Card title="pkg/qdrant" icon="database">
+    Qdrant vector database client — collection management, upsert, and vector search with optional severity filter. Integration tests run these against a live Qdrant instance.
+  </Card>
+</CardGroup>
+
+---
+
+## React Frontend Tests
+
+Frontend tests live in `siemagent/web/`. Unit tests run in a jsdom environment via Vitest; end-to-end tests run in a real Chromium browser via Playwright.
+
+```bash
+cd siemagent/web
+
+npx vitest run             # Unit tests (Vitest + Testing Library)
+npx playwright test        # End-to-end tests
+```
+
+### Unit tests (Vitest + Testing Library)
+
+The Vitest config (`vitest.config.ts`) sets up a `jsdom` environment with global test APIs and excludes the `e2e/` directory so Playwright specs do not run through Vitest:
+
+```ts
+// vitest.config.ts (excerpt)
+test: {
+  environment: 'jsdom',
+  globals: true,
+  setupFiles: ['./src/test/setup.ts'],
+  exclude: ['e2e/**', 'node_modules/**'],
+}
+```
+
+Covered components and hooks:
+
+| Test file | What it covers |
+|---|---|
+| `AlertTicker.test.tsx` | Incident ticker banner — renders, auto-scrolls, clears on dismiss |
+| `EventCard.test.tsx` | Event card rendering for each severity, IOC chip display, expand/collapse |
+| `IOCList.test.tsx` | IP, domain, and hash chip rendering with VirusTotal / AbuseIPDB link generation |
+| `MITREHeatmap.test.tsx` | Tactic/technique heatmap cell colours and empty-state handling |
+| `SeverityBadge.test.tsx` | Correct colour and label for P1–P5 severity values |
+| `ThreatIntelPanel.test.tsx` | Threat intel panel layout and conditional field visibility |
+| `useAlertStream.test.ts` | `useAlertStream` hook — WebSocket connection lifecycle, message dispatch, reconnect logic |
+| `Docs.test.tsx` | Docs page rendering and in-page navigation anchors |
+
+### End-to-end tests (Playwright)
+
+Playwright specs live in `e2e/` (`classify.spec.ts`). The Playwright config auto-starts the Vite dev server if it is not already running, then drives Chromium:
+
+```ts
+// playwright.config.ts (excerpt)
+use: {
+  baseURL: 'http://localhost:5173',
+  trace: 'on-first-retry',
+},
+webServer: {
+  command: 'npm run dev',
+  url: 'http://localhost:5173',
+  reuseExistingServer: !process.env.CI,
+  timeout: 60_000,
+}
+```
+
+The suite uses `page.route()` to mock the API at the browser network layer, so **no running Go backend or live LLM is required** — the tests are fully deterministic and safe to run in CI after `npx playwright install chromium`.
+
+---
+
+## Development Workflow
+
+For day-to-day iteration, `make dev` is the fastest feedback loop. It runs the Go backend with hot reload via `air` and the Vite frontend in parallel using a single process group:
+
+```bash
+cd siemagent
+make dev
+```
+
+`air` watches Go source files and recompiles on save. If `air` is not installed it falls back to `go run ./cmd/siemagent --serve`. The Vite dev server at `http://localhost:5173` proxies `/api` requests to the Go backend at `:8080`.
+
+---
+
+<Note>
+  `make test` passes `-race` to the Go test binary. The race detector instruments every goroutine memory access at runtime and reports data races that would be silent in production builds. The classification pipeline, WebSocket hub, and event store all use concurrency — keeping the race detector green is a hard requirement before merging.
+</Note>
+
+<Warning>
+  Integration tests (`make test-integration`) connect to a real Qdrant instance. Run `make docker-up` before executing them, otherwise the Qdrant client dials will time out and the tests will fail:
+
+  ```bash
+  cd siemagent
+  make docker-up           # Start Qdrant (and Postgres + Ollama)
+  make test-integration    # Now safe to run
+  ```
+</Warning>

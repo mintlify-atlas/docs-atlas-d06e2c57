@@ -1,0 +1,95 @@
+---
+title: "Classify logs from the dashboard or API"
+sidebarTitle: "Log Ingestion"
+description: "Submit individual log lines or upload batch .log files to Go SIEM Agent for LLM classification via the dashboard UI or the REST ingest endpoint."
+---
+
+Go SIEM Agent supports two ingestion modes: **single-line classify** for interactive triage of individual log entries, and **batch file upload** for processing whole log files in one go. Both modes invoke the same LLM classification pipeline — the result is always a structured event with severity, MITRE mapping, IOCs, and remediation steps.
+
+## Single-line classification
+
+Paste any raw log line into the input bar at the top of the dashboard and press **Enter** or click **Classify**. The frontend calls `POST /api/classify` and adds the resulting event card to the top of the feed.
+
+The classifier accepts any log format. Common examples include:
+
+```text
+Failed password for root from 45.33.32.156 port 22
+vssadmin.exe delete shadows /all /quiet
+GET /etc/passwd HTTP/1.1 200
+sudo: hacker USER=root COMMAND=/bin/bash
+```
+
+Each line is independently parsed into structured fields (host, app, timestamp, message) before being sent to the LLM.
+
+## File upload (DropZone)
+
+The **Upload** button (DropZone) to the left of the input bar accepts `.log` and `.txt` files. You can either click the button and pick a file, or drag and drop a file directly onto the button.
+
+<Steps>
+  <Step title="Click Upload or drag a file">
+    Click the **Upload** button in the dashboard header, or drag a `.log` / `.txt` file onto the button. The button border highlights blue while a file is dragged over it.
+  </Step>
+  <Step title="Watch the progress bar">
+    The DropZone splits the file into lines, strips blank lines and comment lines (lines starting with `#`), and classifies them in parallel batches of five. An inline progress counter (`done/total`) and a blue progress bar appear inside the button while processing.
+  </Step>
+  <Step title="Review classified events">
+    Once all batches are complete, every successfully classified event is added to the event feed at once. A toast notification at the bottom of the Upload button summarises the results — for example:
+
+    ```
+    28 classified — 3 Critical, 5 High
+    ```
+  </Step>
+  <Step title="Inspect results">
+    Click any event card to open the detail panel and review severity, MITRE mapping, IOCs, and the AI-generated remediation recommendation.
+  </Step>
+</Steps>
+
+<Note>
+  The DropZone classifies all non-blank lines in your file — the back-end `POST /api/ingest` endpoint enforces a hard limit of **500 log lines per batch request**. Files with more than 500 lines will have lines beyond that limit silently dropped. Split large files into chunks of ≤ 500 lines before uploading.
+</Note>
+
+A ready-made test file with 30 mixed-severity events ships with the repository:
+
+```bash
+siemagent/test-logs.log
+```
+
+## After classification
+
+Once a line is classified the dashboard performs the following actions automatically:
+
+- **Event card appears** in the feed with a severity-coloured left border and attack type label.
+- **P1 Critical cards** render with a `severity-pulse` animation so they stand out immediately.
+- **P1 and P2 events** trigger an autonomous agent investigation — a goroutine launches the LLM tool-calling loop and streams its progress to the alert ticker over WebSocket.
+
+## Via API (automation)
+
+To ingest logs programmatically — for example from a CI pipeline or a log forwarder — send a `POST` request to `/api/ingest`:
+
+```bash
+curl -X POST http://localhost:8080/api/ingest \
+  -H "Content-Type: application/json" \
+  -d '{
+    "logs": [
+      "Failed password for root from 45.33.32.156 port 22",
+      "vssadmin.exe delete shadows /all /quiet",
+      "GET /etc/passwd HTTP/1.1 200"
+    ],
+    "format": "auto"
+  }'
+```
+
+The endpoint classifies all lines using the concurrent worker pool, stores each result in Qdrant (vector embedding) and PostgreSQL, and returns a chunked streaming progress response so you can track completion without polling.
+
+Available `format` values: `"auto"` (default), `"syslog"`, `"json"`, `"raw"`.
+
+<Tip>
+  Use `make seed` to quickly populate the dashboard with 10 sample syslog events without typing or uploading anything:
+
+  ```bash
+  cd siemagent
+  make seed
+  ```
+
+  This sends 10 pre-written log lines to `POST /api/classify` and is useful for demoing the analytics charts and MITRE heatmap.
+</Tip>

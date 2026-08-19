@@ -1,0 +1,130 @@
+---
+title: "Go SIEM Agent REST API reference overview"
+sidebarTitle: "Overview"
+description: "Overview of Go SIEM Agent's HTTP API — base URL, authentication, rate limiting, content type, error format, and links to all endpoint documentation."
+---
+
+The Go HTTP server listens on `:8080` and exposes every classification, search, analytics, and observability operation as a standard REST or WebSocket endpoint. All routes are registered on a [Chi](https://github.com/go-chi/chi) router with request-ID injection, structured logging, automatic panic recovery, per-IP rate limiting, and a shared security-header middleware that runs on every response.
+
+## Base URL
+
+```
+http://localhost:8080
+```
+
+The port is configurable via the `CONDUCTOR_PORT` environment variable. In production, place a reverse proxy (nginx, Caddy, etc.) in front and update `ALLOWED_ORIGIN` to match your frontend domain.
+
+## Authentication
+
+No bearer token is required on any endpoint. Access control is handled exclusively through the `ALLOWED_ORIGIN` CORS setting — only origins matching that value receive an `Access-Control-Allow-Origin` response header.
+
+The `KIMCHI_API_KEY` is a **server-side** environment variable used to authenticate outbound calls to the LLM provider. Clients never see it and must never include it in requests.
+
+## Rate Limiting
+
+The server enforces **100 requests per second per IP address** using a token-bucket algorithm. Idle IP entries are evicted after 5 minutes to prevent unbounded memory growth.
+
+When the limit is exceeded the server responds immediately with:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Content-Type: application/json
+
+{"error": "rate limit exceeded"}
+```
+
+## Content Type
+
+All `POST` request bodies must be JSON. Include the header:
+
+```
+Content-Type: application/json
+```
+
+Responses are always `application/json` (or `text/event-stream` for SSE, `text/plain` for `/metrics`).
+
+## Error Format
+
+All error responses return a JSON object. Standard errors use a single field:
+
+```json
+{"error": "message describing what went wrong"}
+```
+
+Validation errors on a specific field include an additional `field` key:
+
+```json
+{"error": "log field must not exceed 8192 bytes", "field": "log"}
+```
+
+Common HTTP status codes:
+
+| Status | Meaning |
+|--------|---------|
+| `400` | Request validation failed |
+| `429` | Rate limit exceeded |
+| `500` | Classification or server error |
+| `503` | Downstream dependency unavailable |
+
+## Security Headers
+
+Every response from the server includes the following security headers regardless of which endpoint is called:
+
+| Header | Value |
+|--------|-------|
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `Content-Security-Policy` | `default-src 'self'` |
+
+## Route Table
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/classify` | Classify a single log line |
+| `POST` | `/api/classify/stream` | SSE streaming classification |
+| `POST` | `/api/ingest` | Batch classify up to 500 log lines |
+| `GET` | `/api/search` | Semantic vector search over events |
+| `GET` | `/api/analytics/summary` | Analytics summary |
+| `GET` | `/ws/alerts` | WebSocket live incident stream |
+| `GET` | `/health` | Liveness probe |
+| `GET` | `/health/ready` | Readiness probe |
+| `GET` | `/metrics` | Prometheus metrics |
+| `GET` | `/docs` | Swagger UI |
+
+<Note>
+The legacy top-level routes `POST /classify` and `POST /classify/stream` are kept as aliases for backward compatibility with clients that predate the `/api/` prefix. They behave identically to their `/api/` counterparts.
+</Note>
+
+<Tip>
+An interactive Swagger UI with a built-in request builder is available at [http://localhost:8080/docs](http://localhost:8080/docs). The raw OpenAPI 3.0 spec is served at `/docs/openapi.yaml`.
+</Tip>
+
+## Endpoint Pages
+
+<CardGroup cols={2}>
+  <Card title="POST /api/classify" icon="bolt" href="/api-reference/classify">
+    Classify a single log line with the LLM and receive a full ClassifiedEvent response.
+  </Card>
+  <Card title="POST /api/classify/stream" icon="signal-stream" href="/api-reference/classify-stream">
+    Stream incremental LLM tokens via Server-Sent Events, then receive the final result.
+  </Card>
+  <Card title="POST /api/ingest" icon="layer-group" href="/api-reference/ingest">
+    Batch classify up to 500 log lines in parallel and index results in Qdrant.
+  </Card>
+  <Card title="GET /api/search" icon="magnifying-glass" href="/api-reference/search">
+    Embed a natural-language query and find the most similar past events by cosine similarity.
+  </Card>
+  <Card title="GET /api/analytics/summary" icon="chart-bar" href="/api-reference/analytics">
+    Aggregate attack counts, a 6-hour event timeline, and MITRE tactic distribution.
+  </Card>
+  <Card title="WS /ws/alerts" icon="tower-broadcast" href="/api-reference/websocket-alerts">
+    Subscribe to live P1/P2 agent investigation frames over WebSocket.
+  </Card>
+  <Card title="GET /health" icon="heart-pulse" href="/api-reference/health">
+    Liveness and readiness probes for container orchestration.
+  </Card>
+  <Card title="GET /metrics" icon="gauge-high" href="/api-reference/metrics">
+    Prometheus metrics endpoint for Grafana dashboards.
+  </Card>
+</CardGroup>

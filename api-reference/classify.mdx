@@ -1,0 +1,186 @@
+---
+title: "POST /api/classify — classify a single log line"
+sidebarTitle: "POST /api/classify"
+description: "POST /api/classify — sends a raw log line to the LLM classifier and returns a ClassifiedEvent with attack type, severity, MITRE mapping, IOCs, and remediation."
+---
+
+This endpoint accepts a raw log line, parses it into structured fields (auto-detecting RFC 5424 syslog, RFC 3164 syslog, JSON, or treating the input as a raw string), and sends it to the LLM classifier. The resulting `ClassifiedEvent` is stored in the server's in-memory ring buffer and, for P1 and P2 severity events, automatically triggers an autonomous agent investigation whose progress is broadcast over the `/ws/alerts` WebSocket.
+
+## Request
+
+**Method:** `POST`  
+**Path:** `/api/classify`  
+**Content-Type:** `application/json`
+
+### Body Parameters
+
+<ParamField body="log" type="string" required>
+  The raw log line to classify. Maximum **8,192 bytes**. Any encoding understood by the parser is accepted (syslog priority codes, ISO timestamps, JSON objects, plain strings).
+</ParamField>
+
+<ParamField body="format" type="string">
+  Parser hint. One of `syslog`, `json`, or `auto`. Defaults to `auto`, which tries RFC 5424, RFC 3164, and JSON in order, then falls back to a raw string if none match.
+</ParamField>
+
+## Response
+
+**Status:** `200 OK`  
+**Content-Type:** `application/json`
+
+Returns a `ClassifiedEvent` object.
+
+<ResponseField name="event" type="object">
+  The parsed log event.
+  <Expandable title="LogEvent fields">
+    <ResponseField name="raw" type="string">
+      The original unparsed log line exactly as received.
+    </ResponseField>
+    <ResponseField name="timestamp" type="string (datetime)">
+      ISO 8601 timestamp extracted from the log, or the parse time if no timestamp was present.
+    </ResponseField>
+    <ResponseField name="hostname" type="string">
+      Hostname parsed from the log header. Omitted for raw logs that contain no hostname.
+    </ResponseField>
+    <ResponseField name="app_name" type="string">
+      Application name (e.g. `sshd`, `nginx`). Omitted when unavailable.
+    </ResponseField>
+    <ResponseField name="proc_id" type="string">
+      Process ID string from the log header. Omitted when unavailable.
+    </ResponseField>
+    <ResponseField name="message" type="string">
+      The human-readable message portion of the log line.
+    </ResponseField>
+    <ResponseField name="source" type="string">
+      Parser that produced this event. One of `syslog`, `json`, or `raw`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="attack_type" type="string">
+  LLM classification label. Examples: `"Brute Force"`, `"SQL Injection"`, `"Privilege Escalation"`, `"Port Scan"`, `"Benign"`.
+</ResponseField>
+
+<ResponseField name="mitre" type="object">
+  MITRE ATT&CK mapping for this event.
+  <Expandable title="MITREInfo fields">
+    <ResponseField name="tactic" type="string">
+      ATT&CK tactic name, e.g. `"Credential Access"`. Set to `"N/A"` for benign events.
+    </ResponseField>
+    <ResponseField name="technique_id" type="string">
+      ATT&CK technique ID, e.g. `"T1110.001"`. Set to `"N/A"` for benign events.
+    </ResponseField>
+    <ResponseField name="technique" type="string">
+      ATT&CK technique name, e.g. `"Password Guessing"`. Set to `"N/A"` for benign events.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="severity" type="string">
+  Triage severity assigned by the LLM. One of `P1` (Critical), `P2` (High), `P3` (Medium), `P4` (Low), or `P5` (Info).
+</ResponseField>
+
+<ResponseField name="confidence" type="float">
+  LLM confidence score between `0.0` and `1.0`. Values above `0.85` indicate high certainty in the classification.
+</ResponseField>
+
+<ResponseField name="iocs" type="array of strings">
+  Indicators of compromise extracted from the log line — IP addresses, usernames, domains, file paths, or hashes identified by the LLM as relevant to the event.
+</ResponseField>
+
+<ResponseField name="summary" type="string">
+  A human-readable one-to-two sentence description of what the log event represents.
+</ResponseField>
+
+<ResponseField name="remediation" type="string">
+  Concrete remediation steps recommended for the detected threat. Empty string for benign events.
+</ResponseField>
+
+<ResponseField name="processed_at" type="string (datetime)">
+  ISO 8601 timestamp of when classification completed on the server.
+</ResponseField>
+
+## Error Responses
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `400` | `{"error": "log field is required", "field": "log"}` | Missing `log` field |
+| `400` | `{"error": "log field must not exceed 8192 bytes", "field": "log"}` | Log line too large |
+| `400` | `{"error": "format must be one of: syslog, json, auto", "field": "format"}` | Invalid format value |
+| `400` | `{"error": "invalid JSON body"}` | Malformed request body |
+| `429` | `{"error": "rate limit exceeded"}` | IP exceeded 100 req/s |
+| `500` | `{"error": "stream open: context deadline exceeded"}` | LLM call failed |
+
+## Examples
+
+### SSH Brute Force (syslog)
+
+```bash
+curl -X POST http://localhost:8080/api/classify \
+  -H "Content-Type: application/json" \
+  -d '{
+    "log": "<165>1 2024-01-15T10:30:00Z webserver sshd 1234 - Failed password for root from 192.168.1.100 port 22",
+    "format": "syslog"
+  }'
+```
+
+```json
+{
+  "event": {
+    "raw": "<165>1 2024-01-15T10:30:00Z webserver sshd 1234 - Failed password for root from 192.168.1.100 port 22",
+    "timestamp": "2024-01-15T10:30:00Z",
+    "hostname": "webserver",
+    "app_name": "sshd",
+    "proc_id": "1234",
+    "message": "Failed password for root from 192.168.1.100 port 22",
+    "source": "syslog"
+  },
+  "attack_type": "Brute Force",
+  "mitre": {
+    "tactic": "Credential Access",
+    "technique_id": "T1110.001",
+    "technique": "Password Guessing"
+  },
+  "severity": "P2",
+  "confidence": 0.95,
+  "iocs": ["192.168.1.100", "root"],
+  "summary": "Multiple failed SSH login attempts from 192.168.1.100 targeting the root account.",
+  "remediation": "Block 192.168.1.100 at the firewall. Enable fail2ban on the SSH port. Rotate root credentials and disable direct root login.",
+  "processed_at": "2024-01-15T10:30:01Z"
+}
+```
+
+### JSON Log
+
+```bash
+curl -X POST http://localhost:8080/api/classify \
+  -H "Content-Type: application/json" \
+  -d '{
+    "log": "{\"level\":\"error\",\"msg\":\"authentication failed\",\"time\":\"2024-01-15T10:30:00Z\",\"hostname\":\"auth-01\",\"user\":\"admin\",\"ip\":\"203.0.113.5\"}",
+    "format": "json"
+  }'
+```
+
+### Raw Unstructured Log
+
+```bash
+curl -X POST http://localhost:8080/api/classify \
+  -H "Content-Type: application/json" \
+  -d '{
+    "log": "Jan 15 10:30:00 KERNEL: UFW BLOCK IN=eth0 OUT= SRC=10.0.0.1 DST=192.168.1.1 PROTO=TCP DPT=22",
+    "format": "auto"
+  }'
+```
+
+### Auto-format Detection
+
+```bash
+curl -X POST http://localhost:8080/api/classify \
+  -H "Content-Type: application/json" \
+  -d '{
+    "log": "<85>Jan 15 10:30:00 appserver sudo: user1 : TTY=pts/0 ; PWD=/root ; USER=root ; COMMAND=/bin/bash"
+  }'
+```
+
+<Note>
+Events classified as **P1** (Critical) or **P2** (High) automatically trigger an autonomous agent investigation. The agent calls threat-intelligence tools (MITRE lookup, AbuseIPDB IP reputation, AlienVault OTX) and streams its findings as JSON frames over the `/ws/alerts` WebSocket. Connect to that endpoint before submitting high-severity logs if you want to observe the investigation in real time.
+</Note>

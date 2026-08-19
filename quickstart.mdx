@@ -1,47 +1,215 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get started with Go SIEM Agent"
+sidebarTitle: "Quickstart"
+description: "Install Go SIEM Agent, start Docker services, configure your LLM API key, and classify your first security log line in under 10 minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+By the end of this guide you will have the full Go SIEM Agent stack running locally: Docker-managed Qdrant, PostgreSQL, and Ollama services; the Go HTTP backend listening on port 8080 with semantic search and live incident streaming enabled; and the React dashboard available at `http://localhost:5173`. You will then send a real SSH brute-force log line to the API and see a structured threat intelligence response — attack type, MITRE mapping, IOCs, and remediation steps — returned in under two seconds.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+
+  <Step title="Prerequisites">
+    Confirm the following tools are installed before you begin:
+
+    | Tool | Version | Purpose |
+    |------|---------|---------|
+    | Go | 1.25+ | Backend build and runtime |
+    | Node.js | 18+ | React dashboard |
+    | Docker + Docker Compose | Latest | Qdrant, PostgreSQL, Ollama |
+    | Kimchi API key | — | LLM inference at `api.kimchi.ai` |
+
+    Get a free Kimchi API key at [app.kimchi.dev](https://app.kimchi.dev). Any OpenAI-compatible provider also works — see the note at the end of this page.
+  </Step>
+
+  <Step title="Clone the repository">
+    Clone the repo and navigate to the `siemagent` directory where all backend code, the Makefile, and Docker Compose configuration live:
 
     ```bash
-    npm install your-package
+    git clone https://github.com/ChanchalS7/go-siem-agent-llm-classifier.git
+    cd go-siem-agent-llm-classifier/siemagent
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Configure environment">
+    Run `make setup` to copy the example environment file, download Go dependencies, and install frontend npm packages in one step:
 
     ```bash
-    your-cli init
+    make setup
     ```
+
+    Now open `.env` in your editor and set your LLM API key:
+
+    ```env
+    KIMCHI_API_KEY=your_key_here
+    ```
+
+    The full `.env` file (from `.env.example`) looks like this:
+
+    ```env
+    # LLM provider — Kimchi (default) or any OpenAI-compatible endpoint
+    KIMCHI_API_KEY=your_kimchi_api_key_here
+    KIMCHI_BASE_URL=https://api.kimchi.ai/v1
+    SIEM_MODEL=kimi-k2-5
+
+    # Server
+    CONDUCTOR_PORT=8080
+    ALLOWED_ORIGIN=http://localhost:5173
+
+    # Vector DB
+    QDRANT_ADDR=localhost:6334
+
+    # PostgreSQL (Phase 3)
+    POSTGRES_DSN=postgres://siemagent:siemagent@localhost:5432/siemagent?sslmode=disable
+
+    # Embeddings
+    OLLAMA_URL=http://localhost:11434
+    ```
+
+    <Note>
+      `ABUSEIPDB_KEY` and `OTX_API_KEY` are optional. When present, the Phase 3 agent will enrich P1/P2 events with live IP-reputation and threat-intel data from AbuseIPDB and AlienVault OTX respectively. The agent degrades gracefully without these keys.
+    </Note>
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Start Docker services">
+    Start Qdrant (vector database), PostgreSQL, and Ollama in the background:
 
     ```bash
-    your-cli start
+    make docker-up
+    ```
+
+    Docker Compose brings up three containers with health checks:
+
+    - **Qdrant** on ports 6333 (HTTP) and 6334 (gRPC)
+    - **PostgreSQL 16** on port 5433 (mapped from container port 5432)
+    - **Ollama** on port 11434
+
+    Wait until all three containers report healthy before proceeding. You can check with:
+
+    ```bash
+    docker compose ps
     ```
   </Step>
+
+  <Step title="Pull the Ollama embedding model">
+    Download the `nomic-embed-text` model (~274 MB) that Ollama uses to generate 768-dimensional embeddings for semantic search:
+
+    ```bash
+    make pull-models
+    ```
+
+    This is required for the `GET /api/search` endpoint and the agent's similar-events recall tool. The download only happens once — the model is cached in the `ollama_data` Docker volume.
+  </Step>
+
+  <Step title="Build and start the backend">
+    Compile the Go binary and launch the HTTP server:
+
+    ```bash
+    make build && make serve
+    ```
+
+    You should see the following output in your terminal, confirming that both the HTTP server and Qdrant are ready:
+
+    ```text
+    INFO  SIEMAgent HTTP server starting  addr=:8080
+    INFO  Qdrant connected, semantic search enabled
+    ```
+
+    <Note>
+      The server also serves interactive Swagger UI documentation at [http://localhost:8080/docs](http://localhost:8080/docs). You can explore and test every API endpoint directly from the browser.
+    </Note>
+  </Step>
+
+  <Step title="Start the frontend">
+    In a new terminal tab, start the Vite development server:
+
+    ```bash
+    cd web && npm run dev
+    ```
+
+    The React dashboard is now available at **[http://localhost:5173](http://localhost:5173)**. Vite proxies all `/api` requests to `:8080`, so no additional CORS configuration is needed.
+  </Step>
+
+  <Step title="Classify your first log">
+    Send a real SSH brute-force log line to the classify endpoint:
+
+    ```bash
+    curl -X POST http://localhost:8080/api/classify \
+      -H "Content-Type: application/json" \
+      -d '{"log": "Failed password for root from 192.168.1.100 port 22", "format": "auto"}'
+    ```
+
+    The API parses the log, sends it to the LLM, and returns a fully structured threat intelligence response:
+
+    ```json
+    {
+      "event": {
+        "raw": "Failed password for root from 192.168.1.100 port 22",
+        "message": "Failed password for root from 192.168.1.100 port 22",
+        "source": "raw"
+      },
+      "attack_type": "Brute Force",
+      "severity": "P3",
+      "confidence": 0.90,
+      "mitre": {
+        "tactic": "Credential Access",
+        "technique_id": "T1110",
+        "technique": "Brute Force"
+      },
+      "iocs": ["192.168.1.100", "root"],
+      "summary": "Failed SSH login attempt for root from 192.168.1.100",
+      "remediation": "Block IP, enforce key-based auth, disable root login",
+      "processed_at": "2024-01-15T10:30:01Z"
+    }
+    ```
+
+    You will also see this event appear in the dashboard at `http://localhost:5173`. If you send a P1 or P2 severity event, the agent investigation will begin automatically and stream live progress to the alert ticker.
+  </Step>
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Environment variables reference
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+| Variable | Description | Default |
+|---|---|---|
+| `KIMCHI_API_KEY` | LLM provider API key | required |
+| `KIMCHI_BASE_URL` | LLM base URL | `https://api.kimchi.ai/v1` |
+| `SIEM_MODEL` | Model ID | `kimi-k2-5` |
+| `CONDUCTOR_PORT` | HTTP server port | `8080` |
+| `ALLOWED_ORIGIN` | CORS allowed origin | `http://localhost:5173` |
+| `QDRANT_ADDR` | Qdrant gRPC address | `localhost:6334` |
+| `POSTGRES_DSN` | PostgreSQL connection string | see `.env.example` |
+| `OLLAMA_URL` | Ollama base URL | `http://localhost:11434` |
+| `ABUSEIPDB_KEY` | AbuseIPDB API key for agent IP-reputation tool | optional |
+| `OTX_API_KEY` | AlienVault OTX API key for agent threat-intel tool | optional |
+
+## CLI mode — no Docker required
+
+<Tip>
+  You can classify a log file from the terminal without starting the HTTP server or any Docker services. Build the binary and pass a log file directly:
+
+  ```bash
+  make build
+  ./bin/siemagent sample.log
+  ```
+
+  To write results to a JSON file instead of stdout:
+
+  ```bash
+  ./bin/siemagent --output results.json sample.log
+  ```
+
+  A ready-made sample file is included at `siemagent/sample.log`, and a 30-line mixed-severity test file is at `siemagent/test-logs.log`.
 </Tip>
+
+## Using another LLM provider
+
+<Note>
+  Any OpenAI-compatible API provider works with Go SIEM Agent. To switch providers, update two variables in your `.env`:
+
+  ```env
+  KIMCHI_BASE_URL=https://api.openai.com/v1
+  SIEM_MODEL=gpt-4o
+  ```
+
+  The `KIMCHI_API_KEY` environment variable is also checked as `OPENAI_API_KEY` as a fallback, so both variable names are accepted.
+</Note>

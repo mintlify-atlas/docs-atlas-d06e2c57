@@ -1,0 +1,178 @@
+---
+title: "Start Qdrant, PostgreSQL, and Ollama with Docker"
+sidebarTitle: "Docker Services"
+description: "Run the required Go SIEM Agent backing services — Qdrant vector DB, PostgreSQL, and Ollama embeddings — using the included Docker Compose configuration."
+---
+
+Go SIEM Agent relies on three backing services for full functionality: **Qdrant** for vector embedding storage and semantic search, **PostgreSQL** for persisting classified events, and **Ollama** for generating `nomic-embed-text` embeddings locally. All three are bundled in the project's `docker-compose.yml` and can be started with a single `make` command.
+
+## Docker Compose configuration
+
+The complete `docker-compose.yml` included in the repository:
+
+```yaml
+version: '3.9'
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: siemagent
+      POSTGRES_PASSWORD: siemagent
+      POSTGRES_DB: siemagent
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U siemagent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  qdrant_data:
+  postgres_data:
+  ollama_data:
+```
+
+## Services
+
+<CardGroup cols={3}>
+  <Card title="Qdrant" icon="database">
+    Vector database for storing log embeddings and powering semantic search. Exposes **port 6333** (HTTP REST) and **port 6334** (gRPC). The agent uses the gRPC port exclusively — configured via `QDRANT_ADDR`.
+  </Card>
+  <Card title="PostgreSQL 16" icon="table">
+    Relational database that stores all classified events. Mapped to **port 5433** on the host (internal container port is 5432). Credentials: user `siemagent`, password `siemagent`, database `siemagent`.
+  </Card>
+  <Card title="Ollama" icon="microchip">
+    Local model runtime that serves `nomic-embed-text` embeddings (768 dimensions) over **port 11434**. Embeddings are generated for every classified event and stored in Qdrant for later similarity search.
+  </Card>
+</CardGroup>
+
+## Makefile commands
+
+<Steps>
+  <Step title="Start all services">
+    Launch Qdrant, PostgreSQL, and Ollama in the background and wait for health checks to pass:
+
+    ```bash
+    make docker-up
+    ```
+
+    You will see Docker Compose pull any missing images and then print the current service status table.
+  </Step>
+  <Step title="Pull the embedding model">
+    After the services are running, download the `nomic-embed-text` model (~274 MB) that Ollama uses for embeddings:
+
+    ```bash
+    make pull-models
+    ```
+
+    This only needs to be run once. The model is persisted in the `ollama_data` Docker volume.
+  </Step>
+  <Step title="Verify services are healthy">
+    Check that all three containers are in the `healthy` state:
+
+    ```bash
+    docker compose ps
+    ```
+
+    Expected output:
+
+    ```
+    NAME                STATUS
+    siemagent-qdrant-1    healthy
+    siemagent-postgres-1  healthy
+    siemagent-ollama-1    healthy
+    ```
+  </Step>
+  <Step title="Stop all services">
+    When you are done, shut down all containers cleanly:
+
+    ```bash
+    make docker-down
+    ```
+
+    Data is preserved in the named Docker volumes (`qdrant_data`, `postgres_data`, `ollama_data`) and will be available the next time you run `make docker-up`.
+  </Step>
+</Steps>
+
+## What happens when services are unavailable
+
+The agent is designed to degrade gracefully — it will not refuse to start if backing services are unreachable.
+
+### Qdrant unavailable
+
+If the agent cannot connect to Qdrant at startup, semantic search is disabled and a warning is logged. Classification, event storage in PostgreSQL, and all API endpoints continue to function normally:
+
+```
+WARN  Qdrant unavailable, semantic search disabled  component=main  error=...
+```
+
+This log line comes from `cmd/siemagent/main.go`:
+
+```go
+qdrantStore, err := pkgqdrant.NewAPIStore(cfg.QdrantAddr, "siem_events")
+if err != nil {
+    slog.Warn("Qdrant unavailable, semantic search disabled",
+        "component", "main", "error", err)
+} else {
+    // ... wire up semantic search and agent recall
+    slog.Info("Qdrant connected, semantic search enabled", "component", "main")
+}
+```
+
+When Qdrant is connected, the success line appears instead:
+
+```
+INFO  Qdrant connected, semantic search enabled  component=main
+```
+
+### PostgreSQL unavailable
+
+Event persistence is skipped when PostgreSQL is unreachable. Classify and ingest endpoints still return results — they just will not be written to the database.
+
+### Ollama unavailable
+
+If Ollama is not running or the `nomic-embed-text` model has not been pulled, vector embedding generation is skipped. Events are classified normally but not indexed into Qdrant for semantic search.
+
+<Note>
+  PostgreSQL is mapped to host port **5433** (not the standard 5432) to avoid collisions with any PostgreSQL instance you may already be running locally. Update `POSTGRES_DSN` in your `.env` accordingly:
+
+  ```bash
+  POSTGRES_DSN=postgres://siemagent:siemagent@localhost:5433/siemagent?sslmode=disable
+  ```
+</Note>
+
+<Tip>
+  Run `docker compose ps` after `make docker-up` to confirm all three services show a `healthy` status before starting the Go server. If a service shows `starting` or `unhealthy`, wait a few seconds and re-run the command — Ollama in particular can take up to 20 seconds to pass its health check on first boot.
+</Tip>

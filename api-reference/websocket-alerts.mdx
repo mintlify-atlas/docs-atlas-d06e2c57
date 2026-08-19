@@ -1,0 +1,120 @@
+---
+title: "WS /ws/alerts — live incident WebSocket stream"
+sidebarTitle: "WS /ws/alerts"
+description: "WebSocket endpoint that streams sanitized AgentEvent frames for P1/P2 incident investigations — tool calls, results, and final verdicts in real time."
+---
+
+Connect to this WebSocket endpoint to receive live updates from the autonomous agent as it investigates P1 (Critical) and P2 (High) severity events. Whenever the classifier returns a high-severity result the server spawns a background agent goroutine that calls threat-intelligence tools in a loop — MITRE technique lookup, AbuseIPDB IP reputation check, AlienVault OTX intel, and Qdrant similar-event recall. Each step in the investigation is sanitized and broadcast as a JSON frame over this endpoint to every connected subscriber.
+
+## Protocol
+
+**Upgrade:** HTTP `GET` → WebSocket (RFC 6455)  
+**Path:** `/ws/alerts`
+
+The connection is server-to-client only. The server ignores any inbound payload from the client; frames sent by the client are read solely to detect disconnection.
+
+## Authentication
+
+No authentication token is required. The CORS `ALLOWED_ORIGIN` setting from the server configuration applies — the WebSocket upgrader defers origin checking to the same CORS middleware used by all HTTP endpoints.
+
+## Message Format
+
+Every message sent by the server is a JSON object with the following fields:
+
+<ResponseField name="incident_id" type="string">
+  Random 8-byte hex string identifying this particular agent investigation, e.g. `"a1b2c3d4e5f67890"`. All frames for the same investigation share this ID. A new `incident_id` is generated for each P1/P2 event.
+</ResponseField>
+
+<ResponseField name="event_id" type="string">
+  ISO 8601 timestamp (`processed_at`) of the `ClassifiedEvent` that triggered this investigation. Used to correlate frames back to a specific classified event.
+</ResponseField>
+
+<ResponseField name="type" type="string">
+  Frame type. One of:
+  - `tool_call` — the agent is about to invoke a threat-intelligence tool
+  - `tool_result` — the tool returned a result
+  - `verdict` — the agent has finished its analysis and produced a final verdict
+</ResponseField>
+
+<ResponseField name="data" type="string">
+  JSON-encoded payload for the frame type. For `tool_call` and `tool_result` frames this is a JSON object. For `verdict` frames this is a Markdown-formatted string containing the agent's final analysis.
+</ResponseField>
+
+## Example Frames
+
+A complete investigation produces a sequence of paired `tool_call` / `tool_result` frames followed by a single `verdict` frame:
+
+```json
+{"incident_id":"a1b2c3d4","event_id":"2024-01-15T10:30:01Z","type":"tool_call","data":"{\"tool\":\"lookup_abuseipdb\",\"ip\":\"192.168.1.100\"}"}
+```
+
+```json
+{"incident_id":"a1b2c3d4","event_id":"2024-01-15T10:30:01Z","type":"tool_result","data":"{\"abuse_confidence_score\":87,\"country_code\":\"CN\",\"total_reports\":142}"}
+```
+
+```json
+{"incident_id":"a1b2c3d4","event_id":"2024-01-15T10:30:01Z","type":"tool_call","data":"{\"tool\":\"lookup_mitre\",\"technique_id\":\"T1110.001\"}"}
+```
+
+```json
+{"incident_id":"a1b2c3d4","event_id":"2024-01-15T10:30:01Z","type":"tool_result","data":"{\"tactic\":\"Credential Access\",\"technique\":\"Password Guessing\",\"url\":\"https://attack.mitre.org/techniques/T1110/001/\"}"}
+```
+
+```json
+{"incident_id":"a1b2c3d4","event_id":"2024-01-15T10:30:01Z","type":"verdict","data":"## Summary\nSSH brute force attack from known malicious IP 192.168.1.100 (AbuseIPDB score: 87, 142 prior reports, origin: CN).\n\n## Recommendation\nBlock 192.168.1.100 immediately at the network perimeter. Enable fail2ban. Audit all SSH authentication logs for the past 24 hours."}
+```
+
+## Investigation Lifecycle
+
+Each investigation follows the same loop pattern:
+
+1. The classifier detects a P1 or P2 event and assigns a new `incident_id`.
+2. The agent issues `tool_call` / `tool_result` pairs — up to **8 iterations**.
+3. After the tool loop the agent synthesises a final `verdict` frame.
+4. No further frames are sent for that `incident_id`.
+
+Multiple investigations can be active concurrently. Each has its own `incident_id`; clients should key their state by `incident_id` to track separate threads.
+
+## Examples
+
+### websocat
+
+```bash
+websocat ws://localhost:8080/ws/alerts
+```
+
+### JavaScript
+
+```javascript
+const ws = new WebSocket('ws://localhost:8080/ws/alerts');
+
+ws.onopen = () => console.log('Connected to alert stream');
+
+ws.onmessage = (e) => {
+  const frame = JSON.parse(e.data);
+  const payload = JSON.parse(frame.data);
+
+  switch (frame.type) {
+    case 'tool_call':
+      console.log(`[${frame.incident_id}] Tool call:`, payload);
+      break;
+    case 'tool_result':
+      console.log(`[${frame.incident_id}] Tool result:`, payload);
+      break;
+    case 'verdict':
+      console.log(`[${frame.incident_id}] Verdict:\n`, payload);
+      break;
+  }
+};
+
+ws.onclose = () => console.log('Disconnected');
+ws.onerror = (err) => console.error('WebSocket error:', err);
+```
+
+<Note>
+The server maintains a broadcast **Hub** — every message is sent to **all** connected clients simultaneously. There is no per-client filtering by incident or severity. If you only care about specific investigations, filter on `incident_id` or `event_id` in your client code.
+</Note>
+
+<Warning>
+Agent investigations run with a **2-minute context timeout**. If the LLM or tool calls do not complete within that window the goroutine is cancelled and no `verdict` frame is emitted. Clients should handle the case where an investigation produces `tool_call` / `tool_result` frames but never delivers a `verdict`.
+</Warning>

@@ -1,0 +1,166 @@
+---
+title: "Configure Go SIEM Agent environment variables"
+sidebarTitle: "Environment Variables"
+description: "Complete reference for all Go SIEM Agent environment variables — LLM provider keys, Qdrant, Ollama, PostgreSQL, CORS, and server port settings."
+---
+
+All runtime configuration for Go SIEM Agent is driven by environment variables loaded from a `.env` file at startup. There are no config files to manage — every aspect of the agent, from which LLM provider to use to where Qdrant is listening, is controlled through a single flat file that you create before running the server.
+
+## Create your `.env` file
+
+<Steps>
+  <Step title="Copy the example file">
+    The repository ships an `.env.example` with safe defaults for every variable:
+
+    ```bash
+    cp .env.example .env
+    ```
+  </Step>
+  <Step title="Set your API key">
+    Open `.env` in your editor and replace the placeholder with your actual LLM provider key:
+
+    ```bash
+    KIMCHI_API_KEY=your_kimchi_api_key_here
+    ```
+
+    Get a free key at [app.kimchi.dev](https://app.kimchi.dev). Any OpenAI-compatible provider key works — see [LLM Providers](/configuration/llm-providers) for details.
+  </Step>
+  <Step title="Adjust any other values">
+    All other variables ship with working defaults. Override only what differs in your environment (e.g. a non-default Qdrant address or a custom port).
+  </Step>
+</Steps>
+
+## Variable reference
+
+| Variable | Default | Required |
+|---|---|---|
+| `KIMCHI_API_KEY` | — | **Yes** (or `OPENAI_API_KEY`) |
+| `KIMCHI_BASE_URL` | `https://api.kimchi.ai/v1` | No |
+| `SIEM_MODEL` | `kimi-k2-5` | No |
+| `CONDUCTOR_PORT` | `8080` | No |
+| `ALLOWED_ORIGIN` | `http://localhost:5173` | No |
+| `QDRANT_ADDR` | `localhost:6334` | No |
+| `POSTGRES_DSN` | — | No |
+| `OLLAMA_URL` | `http://localhost:11434` | No |
+| `ABUSEIPDB_KEY` | — | No |
+| `OTX_API_KEY` | — | No |
+
+---
+
+### LLM provider
+
+<ParamField path="KIMCHI_API_KEY" type="string" required>
+  API key used to authenticate with the LLM provider. The config loader first reads this variable; if it is empty it falls back to `OPENAI_API_KEY`. The server will not start if neither variable is set.
+</ParamField>
+
+<ParamField path="KIMCHI_BASE_URL" type="string" default="https://api.kimchi.ai/v1">
+  Base URL of the OpenAI-compatible chat completions endpoint. Override this to switch providers — for example `https://api.openai.com/v1` for OpenAI or `https://api.groq.com/openai/v1` for Groq.
+</ParamField>
+
+<ParamField path="SIEM_MODEL" type="string" default="kimi-k2-5">
+  Model identifier passed in every `/chat/completions` request. Must be a model that is available on the provider configured via `KIMCHI_BASE_URL`. The model must support structured JSON output — see [LLM Providers](/configuration/llm-providers).
+</ParamField>
+
+---
+
+### HTTP server
+
+<ParamField path="CONDUCTOR_PORT" type="string" default="8080">
+  Port the Go HTTP server listens on. Overridable at the command line with `--port` when starting the binary directly. The Makefile `serve` target reads this variable automatically.
+</ParamField>
+
+<ParamField path="ALLOWED_ORIGIN" type="string" default="http://localhost:5173">
+  Value of the CORS `Access-Control-Allow-Origin` header. Set this to the origin of your React frontend. In production, replace with your actual frontend URL (e.g. `https://siem.example.com`).
+</ParamField>
+
+---
+
+### Vector DB (Qdrant)
+
+<ParamField path="QDRANT_ADDR" type="string" default="localhost:6334">
+  gRPC address for the Qdrant vector database in `host:port` format. Port `6334` is the default Qdrant gRPC port. If Qdrant is unreachable at startup the agent logs a warning and continues running with semantic search disabled.
+</ParamField>
+
+---
+
+### Relational DB (PostgreSQL)
+
+<ParamField path="POSTGRES_DSN" type="string">
+  PostgreSQL connection string in DSN format. Example:
+
+  ```
+  postgres://siemagent:siemagent@localhost:5432/siemagent?sslmode=disable
+  ```
+
+  Used by the batch ingest pipeline to persist classified events. If unset, event persistence is skipped.
+</ParamField>
+
+---
+
+### Embeddings (Ollama)
+
+<ParamField path="OLLAMA_URL" type="string" default="http://localhost:11434">
+  Base URL of the locally running Ollama server used to generate `nomic-embed-text` vector embeddings. These embeddings power the semantic search feature in Qdrant. Start Ollama via `make docker-up` and pull the model with `make pull-models`.
+</ParamField>
+
+---
+
+### Threat intelligence tools (optional)
+
+<ParamField path="ABUSEIPDB_KEY" type="string">
+  API key for [AbuseIPDB](https://www.abuseipdb.com/). When set, the Phase 3 LLM agent can call the IP reputation tool to enrich high-severity events with abuse confidence scores. Leave unset to disable the tool — the agent degrades gracefully.
+</ParamField>
+
+<ParamField path="OTX_API_KEY" type="string">
+  API key for [AlienVault OTX](https://otx.alienvault.com/). When set, the agent's threat-intel tool can look up pulse data for extracted IOCs. Leave unset to disable the tool without affecting other functionality.
+</ParamField>
+
+---
+
+## Complete example `.env`
+
+```bash
+# ── LLM provider ───────────────────────────────────────────────────────────────
+# Kimchi (default) — get a free key at https://app.kimchi.dev
+KIMCHI_API_KEY=your_kimchi_api_key_here
+KIMCHI_BASE_URL=https://api.kimchi.ai/v1
+SIEM_MODEL=kimi-k2-5
+
+# ── HTTP server ────────────────────────────────────────────────────────────────
+CONDUCTOR_PORT=8080
+ALLOWED_ORIGIN=http://localhost:5173
+
+# ── Vector DB ──────────────────────────────────────────────────────────────────
+QDRANT_ADDR=localhost:6334
+
+# ── PostgreSQL ─────────────────────────────────────────────────────────────────
+POSTGRES_DSN=postgres://siemagent:siemagent@localhost:5433/siemagent?sslmode=disable
+
+# ── Embeddings ─────────────────────────────────────────────────────────────────
+OLLAMA_URL=http://localhost:11434
+
+# ── Threat intel (optional) ────────────────────────────────────────────────────
+# ABUSEIPDB_KEY=your_abuseipdb_key_here
+# OTX_API_KEY=your_otx_key_here
+```
+
+<Note>
+  `KIMCHI_API_KEY` is read first. If it is not set, the config loader automatically falls back to `OPENAI_API_KEY`. This means existing setups that use the standard OpenAI SDK environment variable will work without any changes.
+
+  ```go
+  apiKey := os.Getenv("KIMCHI_API_KEY")
+  if apiKey == "" {
+      apiKey = os.Getenv("OPENAI_API_KEY")
+  }
+  ```
+</Note>
+
+<Warning>
+  If neither `KIMCHI_API_KEY` nor `OPENAI_API_KEY` is set, the server exits immediately at startup with:
+
+  ```
+  error: set KIMCHI_API_KEY (or OPENAI_API_KEY) before running
+  ```
+
+  The `make check-env` guard also enforces this before any `make serve`, `make run`, or `make dev` invocation.
+</Warning>

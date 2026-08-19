@@ -1,0 +1,155 @@
+---
+title: "Connect Go SIEM Agent to any LLM provider"
+sidebarTitle: "LLM Providers"
+description: "Configure Go SIEM Agent to use Kimchi, OpenAI, Groq, Mistral, or any OpenAI-compatible LLM endpoint by setting KIMCHI_BASE_URL and SIEM_MODEL."
+---
+
+The Go SIEM Agent classifier communicates with LLM providers through the standard OpenAI-compatible chat completions API. Because the integration relies only on `/chat/completions` with a `response_format` of `json_object`, any provider that exposes an OpenAI-compatible endpoint — hosted or local — can drive the classifier without any code changes.
+
+## How the config is loaded
+
+The agent reads provider settings once at startup via `internal/config/config.go`. Defaults are applied if a variable is absent, so switching providers only requires editing your `.env`:
+
+```go
+// internal/config/config.go
+func Load() Config {
+    baseURL := os.Getenv("KIMCHI_BASE_URL")
+    if baseURL == "" {
+        baseURL = "https://api.kimchi.ai/v1"
+    }
+
+    apiKey := os.Getenv("KIMCHI_API_KEY")
+    if apiKey == "" {
+        apiKey = os.Getenv("OPENAI_API_KEY")
+    }
+
+    model := os.Getenv("SIEM_MODEL")
+    if model == "" {
+        model = "kimi-k2-5"
+    }
+
+    return Config{
+        BaseURL:   baseURL,
+        APIKey:    apiKey,
+        ModelName: model,
+        // ...
+    }
+}
+```
+
+The resulting `Config.BaseURL`, `Config.APIKey`, and `Config.ModelName` are passed directly to the `go-openai` client — no provider-specific SDK is needed.
+
+## Provider configuration
+
+<Tabs>
+  <Tab title="Kimchi (default)">
+    [Kimchi](https://app.kimchi.dev) is the default provider and offers a free tier suited for development and low-to-medium production workloads. It exposes a fully OpenAI-compatible endpoint.
+
+    ```bash
+    # .env
+    KIMCHI_API_KEY=your_kimchi_api_key_here
+    KIMCHI_BASE_URL=https://llm.kimchi.dev/openai/v1
+    SIEM_MODEL=minimax-m3
+    ```
+
+    Get a free API key at [app.kimchi.dev](https://app.kimchi.dev). The `minimax-m3` model has strong instruction-following and reliable JSON output, making it well-suited for security classification tasks.
+  </Tab>
+  <Tab title="OpenAI">
+    Use any OpenAI model by pointing `KIMCHI_BASE_URL` at the standard OpenAI API. Your existing `OPENAI_API_KEY` variable is automatically picked up as a fallback if `KIMCHI_API_KEY` is not set.
+
+    ```bash
+    # .env
+    KIMCHI_API_KEY=sk-...          # or leave unset to use OPENAI_API_KEY
+    KIMCHI_BASE_URL=https://api.openai.com/v1
+    SIEM_MODEL=gpt-4o
+    ```
+
+    `gpt-4o` produces high-quality structured output and accurate MITRE ATT&CK mappings. `gpt-4o-mini` is a cost-effective alternative for high-throughput ingestion.
+  </Tab>
+  <Tab title="Groq">
+    [Groq](https://console.groq.com) provides extremely low-latency inference, which is useful when classifying large log batches where speed matters.
+
+    ```bash
+    # .env
+    KIMCHI_API_KEY=gsk_...
+    KIMCHI_BASE_URL=https://api.groq.com/openai/v1
+    SIEM_MODEL=llama-3.3-70b-versatile
+    ```
+
+    `llama-3.3-70b-versatile` on Groq delivers fast, consistent JSON output. For maximum throughput you can also try `llama-3.1-8b-instant`, though classification accuracy is lower on ambiguous log lines.
+  </Tab>
+  <Tab title="Local Ollama">
+    Run a fully local, air-gapped SIEM with no outbound API calls by pointing both `KIMCHI_BASE_URL` and `OLLAMA_URL` at your local Ollama instance. Ollama exposes an OpenAI-compatible `/v1` path.
+
+    ```bash
+    # .env
+    KIMCHI_API_KEY=ollama          # Ollama ignores the key; any non-empty value works
+    KIMCHI_BASE_URL=http://localhost:11434/v1
+    SIEM_MODEL=llama3
+    OLLAMA_URL=http://localhost:11434
+    ```
+
+    Pull the model before starting the server:
+
+    ```bash
+    ollama pull llama3
+    ```
+
+    <Note>
+      When using Ollama for both LLM classification and embeddings, the same Ollama instance serves both roles. `OLLAMA_URL` is used for `nomic-embed-text` embeddings; `KIMCHI_BASE_URL` points at Ollama's OpenAI-compatible path for classification.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Structured JSON output requirement
+
+The classifier instructs the LLM to return a raw JSON object — no markdown fences, no prose. The `LLMAnalysis` struct in `internal/models/models.go` defines the exact shape the model must produce:
+
+```go
+// internal/models/models.go
+type LLMAnalysis struct {
+    AttackType  string   `json:"attack_type"`
+    Tactic      string   `json:"tactic"`
+    TechniqueID string   `json:"technique_id"`
+    Technique   string   `json:"technique"`
+    Severity    string   `json:"severity"`
+    Confidence  float64  `json:"confidence"`
+    IOCs        []string `json:"iocs"`
+    Remediation string   `json:"remediation"`
+    Summary     string   `json:"summary"`
+}
+```
+
+Every classification request passes the system prompt shown below to the model. The model must respond with **only** the JSON object:
+
+| Field | Type | Description |
+|---|---|---|
+| `attack_type` | `string` | Human-readable attack category (e.g. `Brute Force`, `SQL Injection`, `Benign`) |
+| `tactic` | `string` | MITRE ATT&CK tactic name (e.g. `Credential Access`) or `N/A` |
+| `technique_id` | `string` | MITRE ATT&CK technique ID (e.g. `T1110.001`) or `N/A` |
+| `technique` | `string` | MITRE ATT&CK technique name (e.g. `Brute Force: Password Guessing`) or `N/A` |
+| `severity` | `string` | `P1` (Critical) · `P2` (High) · `P3` (Medium) · `P4` (Low) · `P5` (Informational) |
+| `confidence` | `float64` | Classification confidence from `0.0` to `1.0` |
+| `iocs` | `[]string` | Extracted Indicators of Compromise — IPs, domains, hashes, usernames, paths |
+| `remediation` | `string` | Concrete, actionable remediation steps (2–3 sentences) |
+| `summary` | `string` | One-sentence human-readable summary of the event |
+
+<Warning>
+  Models without reliable JSON-mode output — for example, small quantised models or models that ignore system-prompt instructions — may return malformed JSON wrapped in markdown code fences or with missing fields. The classifier includes a regex fallback that attempts to extract the first `{…}` block, but structural errors (wrong field types, missing required keys) will cause the classification to fail. Always test a new model with `make seed` before using it in production.
+</Warning>
+
+<Tip>
+  For security classification tasks, prefer models with strong instruction-following scores and verified JSON output capabilities. In practice, models ≥ 7B parameters from the Llama 3, Mistral, and Qwen families produce reliable results. Hosted frontier models (GPT-4o, Claude 3.5 Sonnet) give the highest accuracy on ambiguous or multi-stage attack patterns.
+</Tip>
+
+## Free tier with Kimchi
+
+Kimchi offers a free tier at [app.kimchi.dev](https://app.kimchi.dev) — no credit card required. The default `.env.example` is pre-configured for Kimchi, so you can start classifying logs within minutes of cloning the repository:
+
+```bash
+# 1. Get a free key at https://app.kimchi.dev
+# 2. Set it in .env
+echo "KIMCHI_API_KEY=your_key_here" >> .env
+# 3. Start the server
+make serve
+```

@@ -1,0 +1,196 @@
+---
+title: "How Go SIEM Agent classifies security log events"
+sidebarTitle: "Classification Pipeline"
+description: "Step-by-step walkthrough of Go SIEM Agent's log classification pipeline: parsing, LLM inference, IOC extraction, vector indexing, and storage."
+---
+
+Every log line that enters Go SIEM Agent flows through a deterministic, multi-stage pipeline: the raw text is parsed into a structured event, sent to an LLM for security classification, embedded as a vector for semantic search, persisted in an in-memory ring buffer and Qdrant, and finally returned to the caller as a fully enriched `ClassifiedEvent`. High-severity results (P1 and P2) additionally trigger an autonomous agent investigation before the response is complete.
+
+## Pipeline overview
+
+<Steps>
+  <Step title="Receive">
+    The pipeline begins when a client submits a log line to either of two HTTP endpoints:
+
+    - **`POST /api/classify`** — classifies a single log line and returns the result synchronously.
+    - **`POST /api/ingest`** — accepts a batch of up to 500 log lines, fans them out over a worker pool, and returns an `IngestResponse`.
+
+    ```go
+    // ClassifyRequest is the HTTP request body for POST /classify.
+    type ClassifyRequest struct {
+        Log    string `json:"log"`
+        Format string `json:"format"` // "syslog" | "json" | "auto"
+    }
+
+    // IngestRequest is the HTTP request body for POST /ingest.
+    type IngestRequest struct {
+        Logs   []string `json:"logs"`
+        Format string   `json:"format"` // "syslog" | "json" | "auto"
+    }
+    ```
+
+    <Note>
+      Log lines are capped at **8 192 bytes**. Lines that exceed this limit are rejected with a `400 Validation Error` before parsing begins.
+    </Note>
+  </Step>
+
+  <Step title="Parse">
+    The `Parser` attempts to decode the raw log line into a structured `LogEvent`. It tries four formats in order:
+
+    1. **RFC 5424** syslog — `<PRI>VERSION TIMESTAMP HOSTNAME APP-NAME PROCID MSGID [SD] MSG`
+    2. **RFC 3164** syslog — `<PRI>TIMESTAMP HOSTNAME TAG: MSG`
+    3. **JSON** — any JSON object that contains a `message`, `msg`, `log`, or `MESSAGE` field
+    4. **Raw** — plain text; `source` is set to `"raw"` and `message` equals the full line
+
+    The result is a `LogEvent`:
+
+    ```go
+    type LogEvent struct {
+        Raw       string    `json:"raw"`
+        Timestamp time.Time `json:"timestamp"`
+        Hostname  string    `json:"hostname,omitempty"`
+        AppName   string    `json:"app_name,omitempty"`
+        ProcID    string    `json:"proc_id,omitempty"`
+        Message   string    `json:"message"`
+        Source    string    `json:"source"` // "syslog" | "json" | "raw"
+    }
+    ```
+
+    The JSON parser recognises common field aliases:  `@timestamp` / `time` / `ts` for timestamps, `host` / `source_host` for hostnames, and `app` / `application` / `service` for app names.
+
+    <Tip>
+      Use `"format": "auto"` (the default) to let the parser detect the format automatically. Specify `"format": "syslog"` or `"format": "json"` when you know the source and want to skip the detection heuristics.
+    </Tip>
+  </Step>
+
+  <Step title="LLM Classify">
+    The `Classifier` sends a structured prompt to any OpenAI-compatible API (default: `minimax-m3` via Kimchi). The system prompt instructs the LLM to act as a security analyst and return a strict JSON object:
+
+    ```go
+    // LLMAnalysis is the JSON shape the LLM must return.
+    type LLMAnalysis struct {
+        AttackType  string   `json:"attack_type"`
+        Tactic      string   `json:"tactic"`
+        TechniqueID string   `json:"technique_id"`
+        Technique   string   `json:"technique"`
+        Severity    string   `json:"severity"`
+        Confidence  float64  `json:"confidence"`
+        IOCs        []string `json:"iocs"`
+        Remediation string   `json:"remediation"`
+        Summary     string   `json:"summary"`
+    }
+    ```
+
+    The classifier uses **streaming** internally (`CreateChatCompletionStream`) at `temperature: 0.1` so the JSON response is assembled token by token. Markdown code fences are stripped from the output before parsing. If the LLM returns an unknown severity string, it is normalised to `"P5"`.
+
+    The user message includes every structured field parsed in the previous step (source, timestamp, hostname, app name, PID, message), followed by the raw log line — giving the LLM both the structured context and the verbatim input.
+  </Step>
+
+  <Step title="Embed">
+    After a successful LLM response, the classifier asynchronously fires a goroutine to generate a vector embedding. Ollama's `nomic-embed-text` model converts a concatenation of the event's `source`, `app_name`, `message`, `attack_type`, and MITRE tactic into a **768-dimensional** `[]float32` vector.
+
+    Embedding runs in a background goroutine so it never delays the HTTP response:
+
+    ```go
+    // Asynchronously embed and index into Qdrant — does not block the response.
+    if c.embedder != nil && c.indexer != nil {
+        go c.indexEvent(result)
+    }
+    ```
+
+    If Ollama is unreachable the embedding is silently skipped (a warning is logged), but classification still succeeds.
+  </Step>
+
+  <Step title="Store">
+    Simultaneously, two stores receive the classified event:
+
+    - **In-memory ring buffer** — `store.Store` keeps the latest **1 000 events** in RAM for instant dashboard retrieval. Older events are evicted as new ones arrive.
+    - **Qdrant** — the 768-dim vector is upserted into the `siem_events` collection with a metadata payload:
+
+    ```go
+    payload := map[string]any{
+        "event_id":     ev.Event.Raw[:min(32, len(ev.Event.Raw))],
+        "timestamp":    ev.ProcessedAt.Format(time.RFC3339),
+        "source":       ev.Event.Source,
+        "hostname":     ev.Event.Hostname,
+        "attack_type":  ev.AttackType,
+        "severity":     string(ev.Severity),
+        "summary":      ev.Summary,
+        "mitre_tactic": ev.MITRE.Tactic,
+    }
+    ```
+
+    Qdrant creates keyword indexes on `severity` and `attack_type` at collection creation time, enabling hybrid vector + keyword filtering on search queries.
+  </Step>
+
+  <Step title="Respond">
+    The HTTP handler returns a `ClassifiedEvent` JSON to the caller:
+
+    ```go
+    type ClassifiedEvent struct {
+        Event       LogEvent  `json:"event"`
+        AttackType  string    `json:"attack_type"`
+        MITRE       MITREInfo `json:"mitre"`
+        Severity    Severity  `json:"severity"`
+        Confidence  float64   `json:"confidence"`
+        IOCs        []string  `json:"iocs"`
+        Remediation string    `json:"remediation"`
+        Summary     string    `json:"summary"`
+        ProcessedAt time.Time `json:"processed_at"`
+    }
+    ```
+
+    For batch ingestion the response is an `IngestResponse` aggregating per-event results:
+
+    ```go
+    type IngestResponse struct {
+        Accepted   int               `json:"accepted"`
+        Classified int               `json:"classified"`
+        Errors     int               `json:"errors"`
+        Results    []ClassifiedEvent `json:"results"`
+    }
+    ```
+  </Step>
+
+  <Step title="Investigate (P1 / P2)">
+    Events with severity `P1` (Critical) or `P2` (High) automatically trigger the autonomous agent investigation loop after classification. The agent calls external threat-intel tools — MITRE lookup, AbuseIPDB, AlienVault OTX, and semantic event recall — to enrich the event and produce a Markdown incident playbook. Progress events are streamed in real time over the `/ws/alerts` WebSocket hub to connected dashboard clients.
+
+    See [Agent Investigation](/concepts/agent-investigation) for full details.
+  </Step>
+</Steps>
+
+## Worker pool for batch ingestion
+
+When `POST /api/ingest` receives multiple log lines, they are fanned out across a concurrent `WorkerPool`. Each worker pulls `LogEvent` values from a buffered input channel, calls `Classify`, and pushes `ClassifiedEvent` values to an output channel.
+
+```go
+// WorkerPool fans out LogEvents to N classifier goroutines and collects results.
+type WorkerPool struct {
+    n          int
+    classifier classifier.Interface
+    in         chan models.LogEvent
+    out        chan models.ClassifiedEvent
+    wg         sync.WaitGroup
+}
+```
+
+The pool is created with `NewWorkerPool(n, classifier)`, started with `pool.Start(ctx)` (which returns the output channel), populated with `pool.Submit(ev)`, and signalled complete with `pool.Close()`. Worker goroutines drain naturally when the input channel closes, and the output channel is closed after all workers exit.
+
+The number of workers (`n`) is chosen at startup based on available CPU cores, giving linear throughput scaling for large batch ingests.
+
+## Data model summary
+
+<CardGroup cols={2}>
+  <Card title="LogEvent" icon="file-lines">
+    Produced by the parser. Carries the raw log text plus any structured fields extracted from syslog or JSON format: `hostname`, `app_name`, `proc_id`, `timestamp`, `message`, and `source`.
+  </Card>
+  <Card title="LLMAnalysis" icon="brain">
+    The LLM's raw JSON output: `attack_type`, MITRE `tactic` / `technique_id` / `technique`, `severity`, `confidence`, `iocs`, `remediation`, `summary`.
+  </Card>
+  <Card title="MITREInfo" icon="shield">
+    The MITRE ATT&CK slice of a classified event: `tactic`, `technique_id`, and `technique` — embedded inside every `ClassifiedEvent`.
+  </Card>
+  <Card title="ClassifiedEvent" icon="circle-check">
+    The pipeline's final output. Wraps the original `LogEvent` and adds all LLM fields plus `ProcessedAt` timestamp.
+  </Card>
+</CardGroup>

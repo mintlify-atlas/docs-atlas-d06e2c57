@@ -1,0 +1,118 @@
+---
+title: "POST /api/classify/stream — streaming log classification"
+sidebarTitle: "POST /classify/stream"
+description: "POST /api/classify/stream — classifies a log line with SSE streaming, delivering incremental LLM tokens then the final ClassifiedEvent when complete."
+---
+
+This endpoint behaves identically to `POST /api/classify` but streams the LLM response as **Server-Sent Events (SSE)**, delivering incremental tokens as they arrive from the model. Clients receive a sequence of `data:` frames — first raw LLM token chunks, then a final frame containing the complete `ClassifiedEvent` object alongside a `done: true` signal. This lets a UI render partial results progressively rather than waiting for the full classification to complete.
+
+## Request
+
+**Method:** `POST`  
+**Path:** `/api/classify/stream`  
+**Content-Type:** `application/json`
+
+### Body Parameters
+
+<ParamField body="log" type="string" required>
+  The raw log line to classify. Maximum **8,192 bytes**.
+</ParamField>
+
+<ParamField body="format" type="string">
+  Parser hint. One of `syslog`, `json`, or `auto`. Defaults to `auto`.
+</ParamField>
+
+## Response
+
+**Status:** `200 OK`  
+**Content-Type:** `text/event-stream`  
+**Cache-Control:** `no-cache`  
+**Connection:** `keep-alive`
+
+The response body is an SSE stream. Each event is a single `data:` line followed by a blank line. There are three possible event types:
+
+| Frame shape | Meaning |
+|-------------|---------|
+| `{"chunk": "..."}` | Incremental LLM token. Concatenate these to reconstruct the raw LLM output. |
+| `{"result": {...}, "done": true}` | Final `ClassifiedEvent` plus completion signal. No further frames will be sent. |
+| `{"error": "..."}` | Classification failure. The stream ends after this frame. |
+
+## Example SSE Stream
+
+The following shows a complete stream for an SSH brute-force log line. Chunk frames arrive as the LLM generates output; the final `result` frame contains the fully parsed `ClassifiedEvent`.
+
+```
+data: {"chunk":"{\"attack_type\":\"Brute"}
+
+data: {"chunk":" Force\",\"severity\":\"P2\""}
+
+data: {"result":{"attack_type":"Brute Force","severity":"P2","confidence":0.95,"iocs":["192.168.1.100"],"summary":"Multiple failed SSH login attempts.","remediation":"Block IP and rotate credentials.","mitre":{"tactic":"Credential Access","technique_id":"T1110.001","technique":"Password Guessing"},"event":{"raw":"<165>1 2024-01-15T10:30:00Z webserver sshd 1234 - Failed password for root from 192.168.1.100 port 22","timestamp":"2024-01-15T10:30:00Z","hostname":"webserver","app_name":"sshd","proc_id":"1234","message":"Failed password for root from 192.168.1.100 port 22","source":"syslog"},"processed_at":"2024-01-15T10:30:01Z"},"done":true}
+```
+
+## Error Responses
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `400` | `{"error": "log field is required", "field": "log"}` | Missing `log` field |
+| `400` | `{"error": "log field must not exceed 8192 bytes", "field": "log"}` | Log line too large |
+| `400` | `{"error": "format must be one of: syslog, json, auto", "field": "format"}` | Invalid format value |
+| `400` | `{"error": "invalid JSON body"}` | Malformed request body |
+
+When classification fails mid-stream the error is delivered as a `data: {"error": "..."}` frame on the already-open `200` response.
+
+## curl Example
+
+```bash
+curl -X POST http://localhost:8080/api/classify/stream \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "log": "<165>1 2024-01-15T10:30:00Z webserver sshd 1234 - Failed password for root from 192.168.1.100 port 22",
+    "format": "syslog"
+  }'
+```
+
+## JavaScript EventSource Example
+
+Because the native `EventSource` API only supports `GET` requests, use `fetch` with manual SSE parsing for `POST` bodies:
+
+```javascript
+const response = await fetch('/api/classify/stream', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ log: 'Failed password for root from 192.168.1.100 port 22', format: 'auto' }),
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+let buffer = '';
+
+while (true) {
+  const { value, done } = await reader.read();
+  if (done) break;
+  buffer += decoder.decode(value, { stream: true });
+
+  const lines = buffer.split('\n\n');
+  buffer = lines.pop(); // keep incomplete last chunk
+
+  for (const block of lines) {
+    const line = block.replace(/^data: /, '');
+    if (!line) continue;
+    const frame = JSON.parse(line);
+
+    if (frame.chunk) {
+      process.stdout.write(frame.chunk);
+    }
+    if (frame.done) {
+      console.log('\nFinal:', frame.result);
+    }
+    if (frame.error) {
+      console.error('Stream error:', frame.error);
+    }
+  }
+}
+```
+
+<Note>
+The legacy path `POST /classify/stream` (without the `/api/` prefix) is kept as an alias for backward compatibility and behaves identically to `POST /api/classify/stream`.
+</Note>

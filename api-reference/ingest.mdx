@@ -1,0 +1,148 @@
+---
+title: "POST /api/ingest — batch classify up to 500 log lines"
+sidebarTitle: "POST /api/ingest"
+description: "POST /api/ingest — batch classifies up to 500 log lines using a concurrent worker pool, streams chunked progress, and indexes results in Qdrant."
+---
+
+The ingest endpoint classifies multiple log lines in parallel using a configurable worker pool and indexes each successfully classified event in Qdrant for subsequent semantic search. The response uses `Transfer-Encoding: chunked` — every 10 classified events a progress line is flushed to the client, followed by the final `IngestResponse` object once all workers have finished. This makes it suitable for large file uploads where the client needs live feedback without waiting for every line to be processed.
+
+## Request
+
+**Method:** `POST`  
+**Path:** `/api/ingest`  
+**Content-Type:** `application/json`
+
+### Body Parameters
+
+<ParamField body="logs" type="array of strings" required>
+  Log lines to classify. The array must contain at least **1** entry and no more than **500** entries. Empty strings within the array are silently skipped during parsing.
+</ParamField>
+
+<ParamField body="format" type="string">
+  Parser hint applied to every line in the batch. One of `syslog`, `json`, or `auto`. Defaults to `auto`.
+</ParamField>
+
+## Response
+
+**Status:** `200 OK`  
+**Content-Type:** `application/json`  
+**Transfer-Encoding:** `chunked`
+
+The response body is a sequence of newline-delimited JSON objects. Intermediate progress lines are flushed every 10 classified events:
+
+```json
+{"progress": 10, "accepted": 47}
+{"progress": 20, "accepted": 47}
+```
+
+After all events have been classified the final `IngestResponse` object is written:
+
+```json
+{"accepted": 47, "classified": 45, "errors": 2, "results": [...]}
+```
+
+### IngestResponse Fields
+
+<ResponseField name="accepted" type="integer">
+  Number of log lines that were successfully parsed into `LogEvent` objects. Empty lines and lines that cannot be parsed are excluded from this count.
+</ResponseField>
+
+<ResponseField name="classified" type="integer">
+  Number of events that the LLM classifier successfully processed and returned a result for.
+</ResponseField>
+
+<ResponseField name="errors" type="integer">
+  Number of classification failures (`accepted - classified`). Individual LLM timeouts or JSON decode errors are counted here.
+</ResponseField>
+
+<ResponseField name="results" type="array">
+  Array of `ClassifiedEvent` objects — one per successfully classified event. See [POST /api/classify](/api-reference/classify) for the full `ClassifiedEvent` schema.
+</ResponseField>
+
+## Error Responses
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `400` | `{"error": "logs array is empty"}` | `logs` field is present but contains no entries |
+| `400` | `{"error": "maximum 500 log lines per request"}` | Array exceeds the 500-line limit |
+| `400` | `{"error": "invalid JSON body"}` | Malformed request body |
+
+## Examples
+
+### Basic Batch Request
+
+```bash
+curl -X POST http://localhost:8080/api/ingest \
+  -H "Content-Type: application/json" \
+  -d '{
+    "format": "syslog",
+    "logs": [
+      "<165>1 2024-01-15T10:30:00Z webserver sshd 1234 - Failed password for root from 192.168.1.100 port 22",
+      "<165>1 2024-01-15T10:30:01Z webserver sshd 1234 - Failed password for root from 192.168.1.100 port 22",
+      "<165>1 2024-01-15T10:30:02Z webserver sshd 1234 - Accepted publickey for deploy from 10.0.0.5 port 41222"
+    ]
+  }'
+```
+
+**Example response:**
+
+```json
+{
+  "accepted": 3,
+  "classified": 3,
+  "errors": 0,
+  "results": [
+    {
+      "attack_type": "Brute Force",
+      "severity": "P2",
+      "confidence": 0.95,
+      "iocs": ["192.168.1.100", "root"],
+      "summary": "Multiple failed SSH login attempts from 192.168.1.100.",
+      "remediation": "Block the source IP and reset account credentials.",
+      "mitre": {
+        "tactic": "Credential Access",
+        "technique_id": "T1110.001",
+        "technique": "Password Guessing"
+      },
+      "event": {
+        "raw": "<165>1 2024-01-15T10:30:00Z webserver sshd 1234 - Failed password for root from 192.168.1.100 port 22",
+        "timestamp": "2024-01-15T10:30:00Z",
+        "hostname": "webserver",
+        "app_name": "sshd",
+        "proc_id": "1234",
+        "message": "Failed password for root from 192.168.1.100 port 22",
+        "source": "syslog"
+      },
+      "processed_at": "2024-01-15T10:30:01Z"
+    }
+  ]
+}
+```
+
+### JSON Log Batch
+
+```bash
+curl -X POST http://localhost:8080/api/ingest \
+  -H "Content-Type: application/json" \
+  -d '{
+    "format": "json",
+    "logs": [
+      "{\"level\":\"error\",\"msg\":\"auth failed\",\"time\":\"2024-01-15T10:30:00Z\",\"hostname\":\"api-01\"}",
+      "{\"level\":\"warn\",\"msg\":\"rate limit exceeded\",\"time\":\"2024-01-15T10:30:05Z\",\"hostname\":\"api-01\"}"
+    ]
+  }'
+```
+
+### Observing Chunked Progress
+
+Use `curl --no-buffer` to receive progress lines as they stream:
+
+```bash
+curl --no-buffer -X POST http://localhost:8080/api/ingest \
+  -H "Content-Type: application/json" \
+  -d @large-batch.json
+```
+
+<Note>
+The response uses `Transfer-Encoding: chunked`. Some HTTP clients buffer the entire response before returning it to the application. Use a streaming-capable client (or `curl --no-buffer`) to observe intermediate progress lines during large ingestion jobs.
+</Note>

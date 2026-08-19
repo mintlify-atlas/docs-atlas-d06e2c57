@@ -1,23 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Go SIEM Agent — LLM Classifier",
+  "projectType": "ai-ml",
+  "projectName": "Go SIEM Agent — LLM Classifier",
+  "projectDescription": "A production-ready SIEM agent written in Go that uses LLM-based AI to classify, triage, and autonomously investigate security log events in real time, with MITRE ATT&CK mapping, semantic search, IOC enrichment, and a live React dashboard.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#00ADD8",
-    "light": "#38BDF8",
-    "dark": "#0369A1"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/chanchalvdev/go-siem-agent-llm-classifier"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/chanchalvdev/go-siem-agent-llm-classifier"
-    }
-  },
+  "primaryColor": "#00ADD8",
+  "lightColor": "#38BDF8",
+  "darkColor": "#0369A1",
   "navigation": {
     "tabs": [
       {
@@ -93,5 +81,33 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "LLM-based log classification with structured JSON output (attack type, severity, confidence)",
+    "MITRE ATT&CK tactic and technique mapping for every event",
+    "P1–P5 severity triage with automatic P1/P2 agent investigation",
+    "Autonomous incident investigation using tool-calling LLM loop (MITRE, AbuseIPDB, AlienVault OTX, semantic recall)",
+    "Semantic vector search via Ollama embeddings + Qdrant vector database",
+    "IOC extraction and enrichment (IPs, domains, hashes) with VirusTotal/AbuseIPDB links",
+    "Batch log ingestion (up to 500 lines) via concurrent worker pool",
+    "SSE streaming classify endpoint for token-by-token LLM output",
+    "Live WebSocket incident stream with real-time alert ticker",
+    "React 19 dashboard with analytics charts, MITRE heatmap, and threat intel panel",
+    "Prometheus metrics and Swagger UI built in",
+    "CLI mode for offline log file analysis"
+  ],
+  "publicApiSurface": [
+    "POST /api/classify",
+    "POST /api/classify/stream",
+    "POST /api/ingest",
+    "GET /api/search",
+    "GET /api/analytics/summary",
+    "GET /ws/alerts",
+    "GET /health",
+    "GET /health/ready",
+    "GET /metrics",
+    "GET /docs",
+    "CLI: siemagent [flags] <logfile>",
+    "CLI flags: --serve, --port, --workers, --output"
+  ]
 }

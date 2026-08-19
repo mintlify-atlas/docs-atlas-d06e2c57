@@ -1,0 +1,106 @@
+---
+title: "Go SIEM Agent: AI-powered security log classifier"
+sidebarTitle: "Introduction"
+description: "Go SIEM Agent classifies security events with LLM AI, maps them to MITRE ATT&CK, enriches IOCs, and streams live incidents over WebSocket. Built in Go."
+---
+
+Go SIEM Agent is a production-ready Security Information and Event Management system written in Go that transforms raw log lines into structured threat intelligence in real time. Security teams deal with an enormous volume of heterogeneous logs every day — syslog, nginx access logs, Windows Events, auth.log — and manually triaging each one is slow, error-prone, and doesn't scale. Go SIEM Agent solves this by feeding every log line through an LLM classifier that determines attack type, severity, and MITRE ATT&CK mapping instantly, then stores a vector embedding so you can recall similar historical events with a semantic search query, and finally streams live incident investigations directly to your React dashboard over WebSocket.
+
+## The three-phase pipeline
+
+Go SIEM Agent processes every log event through three sequential phases:
+
+**Phase 1 — Parse → Classify:** The parser accepts RFC 5424 syslog, RFC 3164 syslog, JSON logs, and plain raw strings and normalises them into a `LogEvent` struct. That struct is sent to the LLM classifier, which returns a structured `ClassifiedEvent` containing attack type, severity (P1–P5), confidence score, MITRE tactic and technique, extracted IOCs, a plain-English summary, and tailored remediation steps.
+
+**Phase 2 — Enrich → Index:** The classified event is converted to a 768-dimensional `nomic-embed-text` vector by Ollama and written to Qdrant. Any future search query follows the same embed-then-search path, surfacing semantically similar past events ranked by cosine similarity.
+
+**Phase 3 — Investigate → Stream:** For P1 (Critical) and P2 (High) events, the agent runtime launches an autonomous LLM tool-calling loop. It queries the MITRE ATT&CK knowledge base, checks AbuseIPDB for IP reputation, fetches AlienVault OTX threat intelligence, and recalls similar events from Qdrant. Every intermediate finding is broadcast over the `/ws/alerts` WebSocket hub so the React dashboard can display live agent progress in the alert ticker and incident overlay.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card
+    title="AI Classification Pipeline"
+    icon="brain"
+    href="/concepts/classification-pipeline"
+  >
+    OpenAI-compatible LLM (default: Kimchi / kimi-k2-5) classifies every log line with structured JSON output — attack type, severity, confidence, IOCs, and remediation in a single call.
+  </Card>
+  <Card
+    title="Severity Model (P1–P5)"
+    icon="triangle-exclamation"
+    href="/concepts/severity-model"
+  >
+    Five-tier severity system from P1 Critical to P5 Info. P1 events pulse visually in the dashboard and automatically trigger autonomous agent investigation.
+  </Card>
+  <Card
+    title="MITRE ATT&CK Mapping"
+    icon="shield-halved"
+    href="/concepts/mitre-attack-mapping"
+  >
+    Every event is mapped to a tactic (e.g. Credential Access) and technique (e.g. T1110 Brute Force) with direct links to attack.mitre.org for deeper research.
+  </Card>
+  <Card
+    title="Semantic Search"
+    icon="magnifying-glass"
+    href="/concepts/semantic-search"
+  >
+    768-dim Ollama embeddings stored in Qdrant let you search past incidents with natural-language queries — "port scan from external IP" — and get ranked matches by similarity.
+  </Card>
+  <Card
+    title="Agent Investigation"
+    icon="robot"
+    href="/concepts/agent-investigation"
+  >
+    Autonomous LLM tool-calling loop for high-severity events: MITRE lookup, AbuseIPDB IP reputation, AlienVault OTX intel, and similar-event recall are chained into a final verdict.
+  </Card>
+  <Card
+    title="Live Incident Dashboard"
+    icon="gauge-high"
+    href="/dashboard/overview"
+  >
+    React 19 + Vite dashboard with real-time alert ticker, incident overlay, attack-type bar chart, event-rate timeline, and MITRE tactic heatmap.
+  </Card>
+</CardGroup>
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Backend | Go 1.25, Chi router |
+| LLM Provider | Kimchi (`api.kimchi.ai`) — any OpenAI-compatible API |
+| LLM Model | kimi-k2-5 (configurable via `SIEM_MODEL`) |
+| Vector DB | Qdrant (gRPC, port 6334) |
+| Embeddings | Ollama — `nomic-embed-text` (768-dim) |
+| Database | PostgreSQL 16 |
+| Metrics | Prometheus (`/metrics`) |
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS, Recharts |
+| Infrastructure | Docker Compose |
+
+<Note>
+  Go SIEM Agent uses the OpenAI API contract — any compatible provider works out of the box. Set `KIMCHI_BASE_URL` to your provider's base URL and `SIEM_MODEL` to the model ID you want. For example, you can point it at a local Ollama endpoint (`http://localhost:11434/v1`) or any hosted provider such as OpenAI, Together AI, or Groq.
+</Note>
+
+## How it works
+
+Here is the end-to-end journey of a single log line through Go SIEM Agent:
+
+1. **Ingest** — A log line arrives via `POST /api/classify`, `POST /api/classify/stream`, `POST /api/ingest` (batch up to 500 lines), file upload through the dashboard UI, or the CLI (`./bin/siemagent sample.log`).
+
+2. **Parse** — The parser (`internal/parser`) auto-detects the format. RFC 5424 and RFC 3164 syslog lines are fully parsed into hostname, app name, process ID, timestamp, and message. JSON logs are unmarshalled. Plain strings fall back to raw mode. The result is a `LogEvent` struct.
+
+3. **Classify** — The `LogEvent` is serialised and sent to the configured LLM with a security-analysis system prompt. The LLM returns a structured `LLMAnalysis` JSON object containing `attack_type`, `tactic`, `technique_id`, `technique`, `severity`, `confidence`, `iocs`, `remediation`, and `summary`. The classifier wraps this into a `ClassifiedEvent`.
+
+4. **Embed & index** — The classifier calls Ollama to generate a `nomic-embed-text` embedding vector for the event text, then writes the vector and payload to Qdrant (when available).
+
+5. **Store** — The `ClassifiedEvent` is persisted to the in-memory `EventStore` (and PostgreSQL when `POSTGRES_DSN` is set) and becomes searchable via `GET /api/search`.
+
+6. **Investigate (P1/P2)** — If severity is P1 or P2, `maybeInvestigate` launches a background goroutine running the `agent.RunIncidentStream` tool loop. Each step — tool call, finding, verdict — is broadcast as a JSON frame over the WebSocket hub.
+
+7. **Stream to dashboard** — The React frontend subscribes to `/ws/alerts`. The `useAlertStream` hook reduces incoming frames into incident state, rendering them as alert-ticker entries and live incident overlays.
+
+8. **Analytics** — `GET /api/analytics/summary` aggregates attack-type counts, severity distribution, a 6-hour event-rate timeline (10-minute buckets), and MITRE tactic breakdown for the dashboard charts.
+
+## Next steps
+
+Ready to run your first classification? Follow the [Quickstart](/quickstart) to have the full stack running in under ten minutes.

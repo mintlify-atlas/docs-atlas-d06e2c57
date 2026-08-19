@@ -1,0 +1,103 @@
+---
+title: "GET /api/analytics/summary — SIEM event analytics"
+sidebarTitle: "GET /analytics/summary"
+description: "GET /api/analytics/summary — returns attack type counts, 6-hour event timeline, and MITRE tactic distribution over the last 1,000 classified events."
+---
+
+The analytics endpoint aggregates statistics over the last 1,000 classified events held in the server's in-memory ring buffer. All three data shapes returned — attack type counts, the 6-hour timeline, and MITRE tactic distribution — are computed on the fly from the same buffer, so they always reflect the most recently processed events. The response is suitable for driving real-time dashboard charts without any additional client-side aggregation.
+
+## Request
+
+**Method:** `GET`  
+**Path:** `/api/analytics/summary`
+
+No query parameters.
+
+## Response
+
+**Status:** `200 OK`  
+**Content-Type:** `application/json`
+
+Returns an `AnalyticsSummary` object.
+
+<ResponseField name="total_events" type="integer">
+  Total number of events currently held in the ring buffer. Maximum value is `1000`. Once the buffer is full, the oldest event is evicted when a new one arrives.
+</ResponseField>
+
+<ResponseField name="attack_type_counts" type="object">
+  Map of attack type label → count object. Each key is an `attack_type` string (e.g. `"Brute Force"`, `"SQL Injection"`, `"Benign"`).
+  <Expandable title="AttackCount fields">
+    <ResponseField name="count" type="integer">
+      Number of events with this attack type in the ring buffer.
+    </ResponseField>
+    <ResponseField name="severity" type="string">
+      Highest severity level seen for this attack type among all matching events (e.g. `"P1"` through `"P5"`).
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="timeline" type="array">
+  Array of **36** time bucket objects covering the last **6 hours** of activity in 10-minute intervals. Buckets are ordered chronologically from oldest to newest.
+  <Expandable title="TimelineBucket fields">
+    <ResponseField name="time" type="string">
+      Bucket start time formatted as `HH:MM` in UTC, e.g. `"10:30"`.
+    </ResponseField>
+    <ResponseField name="counts" type="object">
+      Map of severity → event count for events that fell within this 10-minute window. Includes keys `P1`, `P2`, and `P3`. Buckets with no events have all counts set to `0`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="mitre_tactics" type="object">
+  Map of MITRE ATT&CK tactic name → event count. Benign events are included under their tactic value (typically `"N/A"`).
+</ResponseField>
+
+## Example
+
+### curl
+
+```bash
+curl http://localhost:8080/api/analytics/summary
+```
+
+### Response
+
+```json
+{
+  "total_events": 142,
+  "attack_type_counts": {
+    "Brute Force": {
+      "count": 87,
+      "severity": "P2"
+    },
+    "Port Scan": {
+      "count": 31,
+      "severity": "P4"
+    },
+    "SQL Injection": {
+      "count": 14,
+      "severity": "P2"
+    },
+    "Benign": {
+      "count": 10,
+      "severity": "P5"
+    }
+  },
+  "timeline": [
+    {"time": "10:00", "counts": {"P1": 0, "P2": 3, "P3": 7}},
+    {"time": "10:10", "counts": {"P1": 1, "P2": 5, "P3": 4}},
+    {"time": "10:20", "counts": {"P1": 0, "P2": 2, "P3": 9}},
+    {"time": "10:30", "counts": {"P1": 0, "P2": 0, "P3": 0}}
+  ],
+  "mitre_tactics": {
+    "Credential Access": 87,
+    "Discovery": 31,
+    "Initial Access": 14,
+    "N/A": 10
+  }
+}
+```
+
+<Warning>
+Analytics data is held **entirely in memory**. Restarting the server resets all counters and the timeline to zero. If you need durable analytics, persist classified events to PostgreSQL and query from there.
+</Warning>

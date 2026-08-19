@@ -1,0 +1,137 @@
+---
+title: "GET /health — liveness and readiness probes"
+sidebarTitle: "GET /health"
+description: "GET /health returns server liveness immediately. GET /health/ready checks LLM and Qdrant connectivity, returning 503 if any dependency is unreachable."
+---
+
+Two dedicated health endpoints support container orchestration platforms such as Kubernetes and Docker Compose. The liveness probe confirms that the HTTP server process is running. The readiness probe actively checks downstream dependencies and reports whether the server is ready to accept traffic, preventing Kubernetes from routing requests to a pod whose LLM or vector database connection has not yet been established.
+
+## GET /health — Liveness Probe
+
+Returns immediately without checking any external dependencies. Use this as the container liveness check — if this endpoint is unreachable, restart the container.
+
+**Method:** `GET`  
+**Path:** `/health`
+
+### Response
+
+**Status:** `200 OK`
+
+```json
+{"status": "ok"}
+```
+
+### curl
+
+```bash
+curl http://localhost:8080/health
+```
+
+---
+
+## GET /health/ready — Readiness Probe
+
+Performs connectivity checks against all configured downstream dependencies. Results are **cached for 10 seconds** to prevent overwhelming the LLM provider with probe traffic under high-frequency polling.
+
+**Method:** `GET`  
+**Path:** `/health/ready`
+
+### Checks Performed
+
+| Dependency | Condition | Method | Timeout |
+|------------|-----------|--------|---------|
+| `llm` | Always checked | `Ping` call to the configured LLM API | 5 seconds |
+| `qdrant` | Only when `QDRANT_ADDR` is set | TCP dial to the Qdrant gRPC address | 2 seconds |
+
+### Response — 200 OK (all dependencies reachable)
+
+```json
+{
+  "status": "ready",
+  "checks": {
+    "llm": "ok",
+    "qdrant": "ok"
+  }
+}
+```
+
+If Qdrant is not configured (no `QDRANT_ADDR`), the `qdrant` key is omitted:
+
+```json
+{
+  "status": "ready",
+  "checks": {
+    "llm": "ok"
+  }
+}
+```
+
+### Response — 503 Service Unavailable (dependency unreachable)
+
+```json
+{
+  "status": "not ready",
+  "checks": {
+    "llm": "ok",
+    "qdrant": "error: dial tcp 127.0.0.1:6334: connect: connection refused"
+  }
+}
+```
+
+When the LLM is unreachable:
+
+```json
+{
+  "status": "not ready",
+  "checks": {
+    "llm": "error: context deadline exceeded"
+  }
+}
+```
+
+### curl
+
+```bash
+# Liveness
+curl http://localhost:8080/health
+
+# Readiness
+curl http://localhost:8080/health/ready
+```
+
+## Kubernetes Probe Configuration
+
+```yaml
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: siem-agent
+      image: siemagent:latest
+      ports:
+        - containerPort: 8080
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        failureThreshold: 3
+      readinessProbe:
+        httpGet:
+          path: /health/ready
+          port: 8080
+        initialDelaySeconds: 10
+        periodSeconds: 15
+        failureThreshold: 3
+      startupProbe:
+        httpGet:
+          path: /health/ready
+          port: 8080
+        failureThreshold: 30
+        periodSeconds: 5
+```
+
+<Tip>
+Use `GET /health/ready` as a **startup probe** in environments where the LLM API may take several seconds to become reachable after container launch. Setting `failureThreshold: 30` with `periodSeconds: 5` gives the server up to 150 seconds to establish LLM connectivity before Kubernetes considers the pod failed.
+</Tip>

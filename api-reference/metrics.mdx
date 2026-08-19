@@ -1,0 +1,126 @@
+---
+title: "GET /metrics — Prometheus metrics endpoint"
+sidebarTitle: "GET /metrics"
+description: "GET /metrics exposes Prometheus metrics for Go SIEM Agent — events classified by severity and attack type, LLM latency histogram, and stream error counter."
+---
+
+The `/metrics` endpoint exposes Prometheus text format metrics for integration with Grafana or any Prometheus-compatible monitoring system. In addition to the three custom SIEM metrics described below, the endpoint automatically includes the full suite of standard Go runtime metrics — goroutine count, GC pause times, heap allocation, and more — via the default Prometheus registry.
+
+## Request
+
+**Method:** `GET`  
+**Path:** `/metrics`
+
+No authentication or query parameters required.
+
+## Custom Metrics
+
+Three custom metrics are registered at startup via `promauto`:
+
+### `events_classified_total`
+
+**Type:** Counter  
+**Labels:** `severity`, `attack_type`
+
+Incremented once for each successfully classified event. The label combination lets you slice by severity level (`P1`–`P5`) and by attack type (`"Brute Force"`, `"SQL Injection"`, `"Benign"`, etc.) independently or together.
+
+```
+# HELP events_classified_total Total number of classified events by severity and attack type.
+# TYPE events_classified_total counter
+events_classified_total{attack_type="Brute Force",severity="P2"} 87
+events_classified_total{attack_type="Benign",severity="P5"} 12
+events_classified_total{attack_type="SQL Injection",severity="P2"} 14
+```
+
+### `classification_duration_seconds`
+
+**Type:** Histogram  
+**Buckets:** `0.1`, `0.5`, `1`, `2`, `5`, `10` seconds
+
+Measures the end-to-end wall-clock time for a single LLM classification call — from when the parsed `LogEvent` is handed to the classifier until the `ClassifiedEvent` is returned. Use the `_bucket`, `_sum`, and `_count` time series to compute latency percentiles.
+
+```
+# HELP classification_duration_seconds Duration of log event classification in seconds.
+# TYPE classification_duration_seconds histogram
+classification_duration_seconds_bucket{le="0.1"} 0
+classification_duration_seconds_bucket{le="0.5"} 12
+classification_duration_seconds_bucket{le="1"} 54
+classification_duration_seconds_bucket{le="2"} 87
+classification_duration_seconds_bucket{le="5"} 87
+classification_duration_seconds_bucket{le="10"} 87
+classification_duration_seconds_bucket{le="+Inf"} 87
+classification_duration_seconds_sum 63.4
+classification_duration_seconds_count 87
+```
+
+### `llm_stream_errors_total`
+
+**Type:** Counter  
+**Labels:** none
+
+Incremented each time a streaming classification (`POST /api/classify/stream`) fails — for example when the LLM context deadline is exceeded or the connection is dropped mid-stream.
+
+```
+# HELP llm_stream_errors_total Total number of errors from the LLM streaming API.
+# TYPE llm_stream_errors_total counter
+llm_stream_errors_total 3
+```
+
+## Standard Go Runtime Metrics
+
+The endpoint also exposes all metrics registered in the default Prometheus registry, which includes:
+
+- `go_goroutines` — current number of goroutines
+- `go_gc_duration_seconds` — GC pause time summary
+- `go_memstats_alloc_bytes` — bytes of allocated heap objects
+- `go_memstats_sys_bytes` — total bytes obtained from OS
+- `process_cpu_seconds_total` — total CPU time used
+- `process_open_fds` — number of open file descriptors
+
+## Prometheus Scrape Configuration
+
+```yaml
+scrape_configs:
+  - job_name: siem_agent
+    static_configs:
+      - targets: ['localhost:8080']
+    scrape_interval: 15s
+    scrape_timeout: 10s
+```
+
+## curl Example
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+## Example Full Output
+
+```
+# HELP events_classified_total Total number of classified events by severity and attack type.
+# TYPE events_classified_total counter
+events_classified_total{attack_type="Brute Force",severity="P2"} 87
+events_classified_total{attack_type="Benign",severity="P5"} 12
+events_classified_total{attack_type="Port Scan",severity="P4"} 31
+# HELP classification_duration_seconds Duration of log event classification in seconds.
+# TYPE classification_duration_seconds histogram
+classification_duration_seconds_bucket{le="0.1"} 0
+classification_duration_seconds_bucket{le="0.5"} 12
+classification_duration_seconds_bucket{le="1"} 54
+classification_duration_seconds_bucket{le="2"} 87
+classification_duration_seconds_bucket{le="5"} 87
+classification_duration_seconds_bucket{le="10"} 87
+classification_duration_seconds_bucket{le="+Inf"} 87
+classification_duration_seconds_sum 63.4
+classification_duration_seconds_count 87
+# HELP llm_stream_errors_total Total number of errors from the LLM streaming API.
+# TYPE llm_stream_errors_total counter
+llm_stream_errors_total 3
+# HELP go_goroutines Number of goroutines that currently exist.
+# TYPE go_goroutines gauge
+go_goroutines 18
+```
+
+<Tip>
+Build a Grafana dashboard using these metrics to track the classification rate per severity (`rate(events_classified_total[5m])`), p95 LLM latency (`histogram_quantile(0.95, rate(classification_duration_seconds_bucket[5m]))`), and a severity-breakdown stacked bar chart over time. The `attack_type` label lets you filter down to specific threat categories.
+</Tip>

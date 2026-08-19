@@ -1,0 +1,92 @@
+---
+title: "Severity levels P1–P5 in Go SIEM Agent"
+sidebarTitle: "Severity Model"
+description: "How Go SIEM Agent's LLM assigns severity levels P1 through P5 to classified security events, with examples and dashboard visual indicators."
+---
+
+Severity is the most operationally important output of the classification pipeline. The LLM assigns one of five levels — P1 through P5 — based on its assessment of the attack's impact, the attacker's apparent level of success, and the surrounding context extracted from the log. A fixed severity guide is baked into the classifier's system prompt so the model applies labels consistently across all event types and log sources.
+
+## Severity type and constants
+
+The severity type is a typed string constant defined in `internal/models/models.go`:
+
+```go
+type Severity string
+
+const (
+    SeverityP1 Severity = "P1"
+    SeverityP2 Severity = "P2"
+    SeverityP3 Severity = "P3"
+    SeverityP4 Severity = "P4"
+    SeverityP5 Severity = "P5"
+)
+```
+
+The classifier validates the LLM's output and normalises any unrecognised string to `"P5"`:
+
+```go
+a.Severity = strings.ToUpper(strings.TrimSpace(a.Severity))
+switch a.Severity {
+case "P1", "P2", "P3", "P4", "P5":
+default:
+    a.Severity = "P5"
+}
+```
+
+## Severity levels
+
+| Level | Name | Meaning | Example events |
+|-------|------|---------|----------------|
+| **P1** | Critical | Active breach, ransomware execution, or confirmed data exfiltration | Ransomware process encrypting files, DNS exfiltration of database dump, confirmed C2 beacon |
+| **P2** | High | Successful intrusion or privilege escalation | Successful SSH root login from a foreign IP, `sudo` to root by an unexpected user |
+| **P3** | Medium | Failed attack attempt or meaningful anomaly | SSH brute-force (failed), port scan detected, unusual outbound connection |
+| **P4** | Low | Policy violation or early-stage reconnaissance | Unexpected process execution, failed auth within normal statistical range |
+| **P5** | Info | Normal operations or informational noise | Routine cron jobs, certificate renewals, routine successful logins |
+
+The LLM prompt reproduces the same definitions verbatim so the model never needs to infer the scale:
+
+> `P1=active breach/ransomware/data exfil, P2=successful intrusion/priv esc, P3=failed attack attempt/anomaly, P4=policy violation/recon, P5=normal ops/noise.`
+
+## What happens at each severity level
+
+<Accordion title="P1 — Critical">
+  P1 events represent the highest operational urgency. As soon as a P1 result is stored, the server's `maybeInvestigate` function fires and launches the autonomous agent investigation loop (bounded at 8 LLM iterations, 2-minute timeout). The agent calls MITRE lookup, AbuseIPDB, AlienVault OTX, and similar-event recall before synthesising a Markdown incident playbook.
+
+  All agent progress events are broadcast in real time over the `/ws/alerts` WebSocket hub. In the dashboard, P1 event cards render with a **pulse animation** so they immediately catch the operator's eye. Severity badges are rendered in deep red.
+</Accordion>
+
+<Accordion title="P2 — High">
+  P2 events also trigger automatic agent investigation with the same tool-calling loop and 2-minute timeout. They appear in the live alert ticker and open the incident overlay on click. Severity badges are orange-red.
+</Accordion>
+
+<Accordion title="P3 — Medium">
+  P3 events are stored in the ring buffer and indexed in Qdrant. They appear in the dashboard event list with an amber badge. No automatic investigation is launched, but an operator can manually open the event detail panel to view MITRE mapping, IOCs, and similar events from the semantic search index.
+</Accordion>
+
+<Accordion title="P4 — Low">
+  P4 events are stored and indexed. They appear with a yellow badge. These are useful for building a baseline of reconnaissance and policy-drift activity over time — the MITRE tactic distribution in Analytics will surface patterns even when individual P4 events look innocuous.
+</Accordion>
+
+<Accordion title="P5 — Informational">
+  P5 events represent benign activity (the LLM sets `attack_type="Benign"` for normal operations). They are stored and indexed for completeness but are visually de-emphasised. They are filterable via the sidebar severity checkboxes.
+</Accordion>
+
+<Warning>
+  **P1 events trigger an immediate autonomous investigation with a 2-minute timeout.** If the LLM or external threat-intel APIs are slow or unavailable, the investigation times out gracefully and a partial playbook is broadcast. No P1 event is silently dropped — the investigation attempt is always made.
+</Warning>
+
+## Dashboard visual indicators
+
+The React dashboard uses colour-coded severity badges across all views:
+
+| Level | Badge colour | Special indicator |
+|-------|-------------|-------------------|
+| P1 | Deep red | Pulse animation on event card |
+| P2 | Orange-red | Highlighted in alert ticker |
+| P3 | Amber | — |
+| P4 | Yellow | — |
+| P5 | Grey | De-emphasised |
+
+The **Analytics** panel surfaces severity distribution as a live counter ("Critical" and "High" event totals) and as a breakdown within the attack-type bar chart, where each bar segment is colour-coded by the dominant severity for that attack category.
+
+The **severity filter** in the dashboard sidebar lets operators hide or focus specific levels. Event counts per severity update in real time as new classifications arrive.

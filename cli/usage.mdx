@@ -1,0 +1,142 @@
+---
+title: "Classify log files from the command line"
+sidebarTitle: "CLI Usage"
+description: "Use the siemagent CLI to classify .log files offline, output JSON results, or start the HTTP server — all from the terminal without a browser."
+---
+
+The `siemagent` binary ships with two modes of operation. In **CLI mode**, you pass one or more log files as arguments and the binary parses, classifies, and prints a summary table — no server process needed. In **server mode** (`--serve`), it starts the full HTTP API with Prometheus metrics, WebSocket alerts, and a React dashboard. Both modes share the same LLM classifier and pipeline under the hood.
+
+## Flags
+
+<ParamField path="--serve" type="bool" default="false">
+  Start HTTP server mode instead of processing log files from the terminal. When set, all positional arguments (log file paths) are ignored and the server binds to the configured port.
+</ParamField>
+
+<ParamField path="--port" type="string">
+  Override the HTTP server port. When not set, the value falls through to the `$CONDUCTOR_PORT` environment variable, then defaults to `8080`. Only applies in `--serve` mode.
+</ParamField>
+
+<ParamField path="--workers" type="int" default="5">
+  Number of concurrent classifier goroutines in the worker pool. Increasing this value speeds up large files at the cost of more parallel LLM API calls. The pool size applies in both CLI and server mode.
+</ParamField>
+
+<ParamField path="--output" type="string">
+  Write the JSON classification results to the specified file path instead of printing the summary table to stdout. The file is created or truncated. Only applies in CLI mode.
+</ParamField>
+
+---
+
+## CLI Mode
+
+CLI mode reads every log file you pass, runs all events through the classifier worker pool, renders a live progress bar to stderr, and prints a colour-coded summary table to stdout when done.
+
+### Basic usage
+
+```bash
+# Classify a single log file
+./bin/siemagent sample.log
+
+# Classify multiple files — events from all files are pooled together
+./bin/siemagent auth.log nginx.log syslog
+
+# Output results to a JSON file instead of the summary table
+./bin/siemagent --output results.json sample.log
+
+# Use more workers for large files (more parallel LLM calls)
+./bin/siemagent --workers 10 large-audit.log
+```
+
+### Progress output
+
+While classifying, a live progress bar is written to stderr. The latest classified event's severity and attack type are shown in colour (P1 red → P5 grey):
+
+```
+Parsed 30 events (25 syslog, 5 json, 0 errors)
+[■■■■■■■■■■□□□□□□□□□□] 15/30 classified — latest: P2 Brute Force
+```
+
+The first line reports the parser breakdown — how many lines were identified as syslog format, JSON format, or failed to parse. The progress bar fills as events are returned by the worker pool.
+
+### Classification summary table
+
+After all events are classified, a sorted summary table is printed. Rows are ordered by severity (P1 first) then attack type alphabetically:
+
+```
+Classification Summary
+────────────────────────────────────────────────────────────
+Severity   Attack Type                     Count
+────────────────────────────────────────────────────────────
+P1         Ransomware                          2
+P2         Brute Force                        12
+P3         Port Scan                           8
+P5         Benign                              8
+────────────────────────────────────────────────────────────
+```
+
+Each severity label is printed in its corresponding terminal colour — red for P1, orange for P2, yellow for P3, blue for P4, and grey for P5.
+
+---
+
+## Server Mode
+
+Server mode starts the full HTTP API, Prometheus metrics endpoint, Swagger UI, and (when Qdrant is reachable) semantic search. Use it when you want the React dashboard or need to integrate with external systems.
+
+```bash
+# Start the server on the default port (from $CONDUCTOR_PORT or 8080)
+./bin/siemagent --serve
+
+# Start the server on a specific port
+./bin/siemagent --serve --port 8080
+
+# Or use the Makefile shortcut (builds first, then starts)
+make serve
+```
+
+The server prints a startup log line and blocks until it receives `SIGINT` or `SIGTERM`, at which point it performs a 15-second graceful shutdown:
+
+```
+INFO  SIEMAgent HTTP server starting  addr=:8080
+INFO  Qdrant connected, semantic search enabled
+```
+
+---
+
+## Build Commands
+
+<Steps>
+  <Step title="Build the Go binary">
+    Compile the backend binary into `./bin/siemagent`. The binary is self-contained for CLI mode; in server mode it serves the frontend from the embedded filesystem if `make build-all` was used.
+
+    ```bash
+    make build        # Build Go binary to ./bin/siemagent
+    ```
+  </Step>
+
+  <Step title="Build the full single-binary release">
+    Compile the React frontend with Vite, embed the `dist/` output into the Go binary at compile time, then produce a single self-contained binary. When you run this binary in `--serve` mode, it serves the dashboard without a separate Vite process.
+
+    ```bash
+    make build-all    # Build frontend + embed into binary (single binary mode)
+    ```
+  </Step>
+</Steps>
+
+---
+
+<Note>
+  `KIMCHI_API_KEY` (or `OPENAI_API_KEY`) must be set in your `.env` file or shell environment before running **any** mode. If the key is absent the binary prints an error to stderr and exits immediately:
+
+  ```
+  error: set KIMCHI_API_KEY (or OPENAI_API_KEY) before running
+  ```
+
+  Run `make setup` to scaffold a `.env` from `.env.example`, then fill in your key.
+</Note>
+
+<Tip>
+  The repository ships with `siemagent/test-logs.log` — a 30-line file that covers a range of attack types and severities (Ransomware P1, Brute Force P2, Port Scan P3, and Benign P5). It is the fastest way to verify your setup end-to-end:
+
+  ```bash
+  ./bin/siemagent siemagent/test-logs.log
+  ```
+</Tip>
